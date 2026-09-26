@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PSG Interpreter</title>
+<meta name="description" content="Upload an overnight polysomnography (EDF) recording: sleep staging, AASM apnea/hypopnea scoring and a draft report, computed privately in your browser.">
+<style>
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --ink: #1b2a3a; --muted: #5b6b7c; --line: #dde3ea;
+    --blue: #1f6fb2; --blue-soft: #eaf3fb; --green: #2e7d32; --amber: #f9a825; --orange: #ef6c00; --red: #c62828;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header { background: var(--ink); color: #fff; }
+  .bar { max-width: 1100px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .bar h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .pill { font-size: 12px; background: rgba(255,255,255,.14); padding: 3px 10px; border-radius: 999px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 22px 16px 40px; }
+  .lead { color: var(--muted); margin: 0 0 18px; max-width: 760px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; margin-bottom: 18px; }
+  .drop { border: 2px dashed #9bb8d3; border-radius: 12px; background: #f7fafd; padding: 38px 16px; text-align: center;
+          cursor: pointer; transition: background .15s, border-color .15s; }
+  .drop.over { background: var(--blue-soft); border-color: var(--blue); }
+  .drop .arrow { font-size: 40px; color: var(--blue); line-height: 1; }
+  .drop h2 { margin: 8px 0 4px; font-size: 20px; }
+  .drop p { margin: 0; color: var(--muted); font-size: 13px; }
+  .btn { display: inline-block; border: 0; border-radius: 7px; padding: 9px 18px; font-size: 14px; cursor: pointer;
+         background: var(--blue); color: #fff; text-decoration: none; }
+  .btn.secondary { background: #fff; color: var(--blue); border: 1px solid var(--blue); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  select { font-size: 14px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: #fff; max-width: 100%; }
+  .engine { font-size: 13px; color: var(--muted); margin-top: 12px; }
+  .engine b { color: var(--ink); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); margin-right: 6px; vertical-align: 1px; }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); }
+  .steps { list-style: none; padding: 0; margin: 12px 0 16px; }
+  .steps li { padding: 4px 0; color: #9aa6b2; }
+  .steps li.done { color: var(--ink); } .steps li.done::before { content: "✔"; color: var(--green); margin-right: 10px; }
+  .steps li.now { color: var(--ink); font-weight: 600; } .steps li.now::before { content: "●"; color: var(--blue); margin-right: 10px; }
+  .steps li.todo::before { content: "○"; margin-right: 10px; }
+  .progress { height: 10px; background: #e8edf2; border-radius: 999px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0; background: var(--blue); transition: width .3s; }
+  .small { font-size: 13px; color: var(--muted); }
+  .dx { border-left: 6px solid var(--muted); padding: 4px 0 4px 16px; }
+  .dx h2 { margin: 0 0 6px; font-size: 22px; }
+  .sev { display: inline-block; color: #fff; border-radius: 4px; padding: 1px 10px; font-size: 13px; font-weight: 600; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 6px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .tile .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .tile .v { font-size: 24px; font-weight: 650; margin-top: 2px; }
+  .tile .v small { font-size: 13px; color: var(--muted); font-weight: 400; }
+  .flags { margin: 10px 0 0; padding-left: 20px; }
+  .warn { background: #fff8e6; border: 1px solid #f3dca0; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px; }
+  .err { background: #fdecec; border: 1px solid #f1b5b5; border-radius: 8px; padding: 12px 14px; }
+  .err pre { white-space: pre-wrap; font-size: 11px; color: #7a3b3b; max-height: 200px; overflow: auto; }
+  iframe { width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fff; min-height: 600px; }
+  footer { max-width: 1100px; margin: 0 auto; padding: 0 16px 30px; font-size: 12px; color: var(--muted); }
+  .hidden { display: none !important; }
+  @media (max-width: 600px) { .drop { padding: 26px 12px; } .dx h2 { font-size: 19px; } .tile .v { font-size: 20px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>PSG Interpreter</h1>
+    <span class="pill">🔒 Runs in your browser · the recording is never uploaded</span>
+  </div>
+</header>
+
+<main>
+  <p class="lead">Upload an overnight polysomnography recording (EDF). The system checks the signals, cleans them,
+    stages sleep, scores apneas and hypopneas using the AASM adult rules, links desaturations and arousals, and
+    writes a draft report for the physician.</p>
+
+  <!-- 1. Upload -->
+  <section id="upload" class="card">
+    <div id="drop" class="drop" tabindex="0" role="button" aria-label="Upload a PSG recording">
+      <div class="arrow">⬆</div>
+      <h2>Drop the PSG recording here</h2>
+      <p>or click to choose a file · EDF / EDF+ / .rec</p>
+    </div>
+    <input id="file" type="file" accept=".edf,.rec,.bdf,.EDF" class="hidden">
+    <div class="row">
+      <label for="rule" class="small">Hypopnea rule</label>
+      <select id="rule">
+        <option value="aasm3">AASM recommended: ≥30% flow drop + ≥3% desaturation or arousal</option>
+        <option value="aasm4">AASM acceptable (CMS): ≥30% flow drop + ≥4% desaturation</option>
+      </select>
+      <button id="sample" class="btn secondary" type="button">Try a sample recording</button>
+    </div>
+    <div id="engine" class="engine"><span class="dot"></span><b>Preparing the analysis engine…</b>
+      <span id="engineMsg">The first visit downloads about 40 MB; later visits are cached.</span></div>
+  </section>
+
+  <!-- 2. Processing -->
+  <section id="processing" class="card hidden">
+    <h2 id="procTitle" style="margin:0;font-size:18px">Analysing…</h2>
+    <div class="small" id="procSub">Analysis runs on this computer and takes 1–3 minutes.</div>
+    <ul id="steps" class="steps"></ul>
+    <div class="progress"><div id="bar"></div></div>
+    <div class="small" id="elapsed" style="margin-top:6px"></div>
+  </section>
+
+  <!-- 3. Results -->
+  <section id="result" class="hidden">
+    <div class="card">
+      <div id="dx" class="dx">
+        <h2 id="dxText"></h2>
+        <span id="sev" class="sev"></span> <span class="small" id="dxMeta"></span>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div id="flagsBox"></div>
+      <div id="warnBox"></div>
+      <div class="row">
+        <a id="dlHtml" class="btn" download>Download report (HTML)</a>
+        <a id="dlCsv" class="btn secondary" download>Event list (CSV)</a>
+        <a id="dlJson" class="btn secondary" download>Summary (JSON)</a>
+        <button id="again" class="btn secondary" type="button">Analyse another recording</button>
+      </div>
+    </div>
+    <iframe id="report" title="Full report" sandbox="allow-same-origin"></iframe>
+  </section>
+
+  <!-- Error -->
+  <section id="error" class="card hidden">
+    <div class="err"><b id="errText"></b><pre id="errDetail" class="hidden"></pre></div>
+    <div class="row"><button id="retry" class="btn" type="button">Try another file</button></div>
+  </section>
+</main>
+
+<footer>
+  Automated decision support following the AASM Scoring Manual (adult rules). Every report must be reviewed by a
+  qualified sleep physician. Not a medical device. Sample recording: St. Vincent's University Hospital / UCD Sleep
+  Apnea Database, PhysioNet (ODC-BY).
+</footer>
+
+<script>
+const STEPS = [
+  ["Checking the file", ["checking", "reading"]],
+  ["Cleaning signals (artifacts, gaps, filters)", ["cleaning"]],
+  ["Sleep staging (30-s epochs)", ["staging"]],
+  ["EEG arousal detection", ["arousal"]],
+  ["Apneas and hypopneas (AASM rules)", ["apnea", "hypopnea"]],
+  ["Oxygen desaturations and indices", ["desaturation", "indices"]],
+  ["Writing the report", ["report", "done"]],
+];
+const SEV = { Normal: "#2e7d32", Mild: "#f9a825", Moderate: "#ef6c00", Severe: "#c62828" };
+const $ = (id) => document.getElementById(id);
+const show = (id) => ["upload", "processing", "result", "error"].forEach((s) => $(s).classList.toggle("hidden", s !== id));
+
+let engineReady = false, busy = false, pending = null, current = 0, t0 = 0, timer = null;
+const worker = new Worker("worker.js");
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === "boot") $("engineMsg").textContent = m.msg;
+  else if (m.type === "ready") {
+    engineReady = true;
+    $("engine").innerHTML = '<span class="dot ok"></span><b>Analysis engine ready.</b>';
+    if (pending) { const p = pending; pending = null; start(p); }
+  } else if (m.type === "fatal") {
+    $("engine").innerHTML = '<span class="dot bad"></span><b>The analysis engine could not load.</b> ' +
+      'Check the internet connection and reload the page. (' + escapeHtml(m.msg) + ')';
+    if (busy) fail({ error: "The analysis engine could not load.", detail: m.msg });
+  } else if (m.type === "progress") progress(m.pct, m.msg);
+  else if (m.type === "result") m.payload.ok ? done(m.payload) : fail(m.payload);
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function accept(file) {
+  if (!file || busy) return;
+  if (!/\.(edf|rec|bdf)$/i.test(file.name)) {
+    fail({ error: `"${file.name}" is not a PSG recording. Please upload an EDF file (.edf, .rec or .bdf) exported from the sleep system.` });
+    return;
+  }
+  start(file);
+}
+
+function start(file) {
+  busy = true;
+  current = 0;
+  $("procTitle").textContent = `Analysing ${file.name}`;
+  $("procSub").textContent = engineReady ? "Analysis runs on this computer and takes 1–3 minutes."
+                                         : "Preparing the analysis engine first (only slow on the first visit)…";
+  renderSteps();
+  $("bar").style.width = "0%";
+  show("processing");
+  t0 = Date.now();
+  clearInterval(timer);
+  timer = setInterval(() => { $("elapsed").textContent = `Elapsed ${Math.round((Date.now() - t0) / 1000)} s`; }, 500);
+  if (!engineReady) { pending = file; return; }
+  $("procSub").textContent = "Analysis runs on this computer and takes 1–3 minutes.";
+  worker.postMessage({ file, rule: $("rule").value });
+}
+
+function progress(pct, msg) {
+  const m = msg.toLowerCase();
+  STEPS.forEach(([_, keys], i) => { if (keys.some((k) => m.includes(k))) current = Math.max(current, i); });
+  if (m.startsWith("done")) current = STEPS.length;
+  $("bar").style.width = pct + "%";
+  renderSteps();
+}
+
+function renderSteps() {
+  $("steps").innerHTML = STEPS.map(([name], i) =>
+    `<li class="${i < current ? "done" : i === current ? "now" : "todo"}">${name}${i === current ? "…" : ""}</li>`).join("");
+}
+
+function blobUrl(text, type) { return URL.createObjectURL(new Blob([text], { type })); }
+
+function done(r) {
+  busy = false;
+  clearInterval(timer);
+  const d = r.diagnosis, x = r.metrics, col = SEV[d.severity] || "#5b6b7c";
+  $("dx").style.borderLeftColor = col;
+  $("dxText").textContent = d.primary;
+  $("sev").textContent = d.severity;
+  $("sev").style.background = col;
+  $("dxMeta").textContent = `${r.name} · ${r.hours} h · ${r.channels} channels · analysed in ${Math.round((Date.now() - t0) / 1000)} s`;
+  const f = (v, u = "") => (v === null || v === undefined) ? "—" : `${v}<small> ${u}</small>`;
+  const tiles = [
+    ["AHI", f(x.ahi, "/h")], ["Obstructive / central AHI", `${x.oahi ?? "—"} / ${x.cahi ?? "—"}<small> /h</small>`],
+    ["ODI", f(x.odi, "/h")], ["Nadir SpO2", f(x.nadir, "%")], ["Time < 90 % SpO2", f(x.t90, "min")],
+    ["Total sleep time", f(x.tst, "min")], ["Sleep efficiency", f(x.se, "%")],
+    ["Events", `${x.events}<small> (${x.oa} OA · ${x.ca} CA · ${x.ma} MA · ${x.hyp} H)</small>`],
+  ];
+  $("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  $("flagsBox").innerHTML = (d.flags && d.flags.length)
+    ? "<b>Clinical flags</b><ul class='flags'>" + d.flags.map((s) => `<li>${escapeHtml(s)}</li>`).join("") + "</ul>" : "";
+  $("warnBox").innerHTML = (r.warnings && r.warnings.length)
+    ? "<div class='warn'><b>Notes on the recording</b><ul class='flags'>" + r.warnings.map((s) => `<li>${escapeHtml(s)}</li>`).join("") + "</ul></div>" : "";
+  const base = r.name.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  $("dlHtml").href = blobUrl(r.html, "text/html"); $("dlHtml").download = `${base}_report.html`;
+  $("dlCsv").href = blobUrl(r.csv, "text/csv"); $("dlCsv").download = `${base}_events.csv`;
+  $("dlJson").href = blobUrl(r.json, "application/json"); $("dlJson").download = `${base}_summary.json`;
+  const frame = $("report");
+  frame.onload = () => { try { frame.style.height = (frame.contentDocument.body.scrollHeight + 40) + "px"; } catch (_) {} };
+  frame.srcdoc = r.html;
+  show("result");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function fail(r) {
+  busy = false;
+  pending = null;
+  clearInterval(timer);
+  $("errText").textContent = r.error || "Something went wrong.";
+  $("errDetail").textContent = r.detail || "";
+  $("errDetail").classList.toggle("hidden", !r.detail);
+  show("error");
+}
+
+// Upload interactions: click, keyboard, drag-and-drop anywhere on the page.
+$("drop").onclick = () => $("file").click();
+$("drop").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } };
+$("file").onchange = () => { accept($("file").files[0]); $("file").value = ""; };
+["dragenter", "dragover"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => document.addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.remove("over"); }));
+document.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) accept(e.dataTransfer.files[0]); });
+$("again").onclick = () => show("upload");
+$("retry").onclick = () => show("upload");
+
+async function runSample() {
+  if (busy) return;
+  const btn = $("sample");
+  btn.disabled = true;
+  btn.textContent = "Downloading sample…";
+  try {
+    const r = await fetch("samples/sample_psg.edf");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const blob = await r.blob();
+    start(new File([blob], "sample_psg.edf"));
+  } catch (err) {
+    fail({ error: "The sample recording could not be downloaded.", detail: String(err) });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Try a sample recording";
+  }
+}
+$("sample").onclick = runSample;
+if (new URLSearchParams(location.search).has("sample")) runSample();
+</script>
+</body>
+</html>

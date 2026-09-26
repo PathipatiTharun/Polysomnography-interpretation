@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "rm -rf public && mkdir -p public/psg public/samples && cp -r web/. public/ && cp psg/*.py public/psg/ && cp test_files/sample_known_ucddb003.edf public/samples/sample_psg.edf",
+  "outputDirectory": "public",
+  "headers": [
+    { "source": "/psg/(.*)", "headers": [{ "key": "Content-Type", "value": "text/plain; charset=utf-8" }] },
+    { "source": "/runner.py", "headers": [{ "key": "Content-Type", "value": "text/plain; charset=utf-8" }] }
+  ]
+}
