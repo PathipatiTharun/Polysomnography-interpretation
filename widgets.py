@@ -409,6 +409,12 @@ class ExplanationPane(QtWidgets.QTextBrowser):
         lim = e.limiting
         lim_txt = (f"<p style='color:#555'>Confidence is limited by <b>{lim.label.lower()}</b>: {lim.text()}.</p>"
                    if e.accepted and lim is not None and lim.score < 0.9 else "")
+        if e.probability is not None:
+            pc = "#2e7d32" if e.probability >= 0.75 else ("#ef6c00" if e.probability >= 0.5 else "#c62828")
+            lim_txt += (f"<p style='color:#555'>Learned probability that a technician would score this: "
+                        f"<b style='color:{pc}'>{e.probability * 100:.0f}%</b> "
+                        f"<span style='color:#888'>(logistic regression on the same measurements, trained on "
+                        f"technician-scored nights; see docs)</span>.</p>")
         self.setHtml(f"""
 <h3 style='margin:0 0 4px'>{title}</h3><p style='margin:0 0 8px'>{conf}</p>{lim_txt}
 <table cellspacing='0' cellpadding='3' style='font-size:12px'>

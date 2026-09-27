@@ -104,3 +104,37 @@ Raising the cut-off to 75 % removes the events that sit within a hair of a thres
 the AHI by roughly a fifth; at 90 % only clear-cut events remain. On the borderline night B almost
 nothing survives 90 %, which agrees with the technician's low AHI. The cut-off is a review aid, not
 a diagnostic setting: the physician should look at the low-confidence events, not silently drop them.
+
+## Learned probability (logistic regression)
+
+Besides the rule-margin confidence, the scorer can attach a learned probability that a
+technician would score the candidate (`RespEvent.probability`, shown as *P(tech)*). It is an
+L2-regularised logistic regression (`psg/calibrate.py`) on eight per-event measurements:
+airflow drop, log duration, desaturation, arousal, share of the event in sleep, usable-signal
+fraction, effort kept, apnea/hypopnea. Labels: a candidate is positive when it overlaps a
+technician-scored event. All candidates (accepted and rejected) are used, so the model can
+learn that some rule-rejected dips are scored by technicians and vice versa.
+
+Leave-one-night-out validation on the six scored nights (1400 candidates, 821 confirmed):
+
+| Night | Candidates | Confirmed | AUC learned | AUC margin | Brier learned | Brier margin |
+|---|---|---|---|---|---|---|
+| ucddb002 | 140 | 84 | 0.83 | 0.72 | 0.18 | 0.26 |
+| ucddb003 | 289 | 230 | 0.76 | 0.81 | 0.17 | 0.12 |
+| ucddb018 | 68 | 3 | 0.75 | 0.66 | 0.09 | 0.09 |
+| ucddb025 | 408 | 362 | 0.80 | 0.75 | 0.10 | 0.16 |
+| unseen_night_A | 229 | 116 | 0.77 | 0.58 | 0.20 | 0.37 |
+| unseen_night_B | 266 | 26 | 0.86 | 0.78 | 0.11 | 0.13 |
+| **Pooled** | 1400 | 821 | **0.88** | 0.80 | **0.14** | 0.19 |
+
+Calibration of the learned probability (predicted → observed share confirmed): 0.12 → 0.08,
+0.29 → 0.25, 0.49 → 0.62, 0.70 → 0.73, 0.96 → 0.91.
+
+Standardised weights: desaturation +1.49, effort kept −0.89, sleep share +0.58, airflow drop
++0.38, apnea +0.22, log duration −0.17, arousal +0.12, signal +0.10. The negative weight on
+effort kept says that, in this laboratory, shallow-breathing dips with well-preserved effort
+were usually *not* scored.
+
+Caveats: six nights from one laboratory, scored with older criteria; the probability reflects
+that lab's habits and should be re-fitted on the target lab's data before clinical use. The
+rule-margin confidence stays the default because every part of it can be read off the signals.

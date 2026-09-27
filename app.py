@@ -959,6 +959,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conf_label = QtWidgets.QLabel("0 %")
         self.conf_label.setMinimumWidth(150)
         conf_row.addWidget(self.conf_label)
+        self.conf_basis = QtWidgets.QComboBox()
+        self.conf_basis.addItem("rule margin", "margin")
+        self.conf_basis.addItem("learned probability", "learned")
+        self.conf_basis.setToolTip("What the cut-off applies to: the rule-threshold margin (explainable, hand-set) "
+                                   "or the logistic-regression probability that a technician would score the event")
+        self.conf_basis.currentIndexChanged.connect(lambda *_: self._conf_changed(self.conf_slider.value()))
+        conf_row.addWidget(self.conf_basis)
         lv.addLayout(conf_row)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Show:"))
@@ -973,8 +980,9 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.chk_rejected)
         lv.addLayout(row)
         split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.ev_table = QtWidgets.QTableWidget(0, 9)
-        self.ev_table.setHorizontalHeaderLabels(["Time", "Dur s", "Type", "Conf %", "Flow ↓%", "Desat %", "Nadir", "Stage", "Notes"])
+        self.ev_table = QtWidgets.QTableWidget(0, 10)
+        self.ev_table.setHorizontalHeaderLabels(["Time", "Dur s", "Type", "Conf %", "P(tech) %", "Flow ↓%", "Desat %", "Nadir", "Stage", "Notes"])
+        self.ev_table.horizontalHeaderItem(4).setToolTip("Learned probability that a technician would score this event")
         self.ev_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.ev_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.ev_table.verticalHeader().setVisible(False)
@@ -984,6 +992,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ev_table.cellDoubleClicked.connect(self._event_clicked)
         self.ev_table.cellClicked.connect(self._event_clicked)
         self.ev_table.setItemDelegateForColumn(3, ConfidenceDelegate(self.ev_table))
+        self.ev_table.setItemDelegateForColumn(4, ConfidenceDelegate(self.ev_table))
         self.ev_table.setAlternatingRowColors(True)
         split.addWidget(self.ev_table)
         self.explain = ExplanationPane()
@@ -1073,7 +1082,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            self.result = rescore_analysis(self.result, params, self.conf_slider.value() / 100.0)
+            self.result = rescore_analysis(self.result, params, self.conf_slider.value() / 100.0,
+                                           self.conf_basis.currentData())
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
         self._refresh_results(f"Re-scored with {self.result.rule_name} in {self.result.runtime_s:.1f} s")
@@ -1082,8 +1092,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.conf_label.setText(f"{value} %")
         if self.result is None or self._thread is not None:
             return
-        self.result = rescore_analysis(self.result, None, value / 100.0)
-        self._refresh_results(f"Confidence cut-off {value} %")
+        self.result = rescore_analysis(self.result, None, value / 100.0, self.conf_basis.currentData())
+        basis = self.conf_basis.currentText()
+        self._refresh_results(f"Cut-off {value} % on {basis}")
 
     def _refresh_results(self, status: str = ""):
         res = self.result
@@ -1335,7 +1346,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # --------------------------------------------------------------------- analysis
     def _options(self):
         return AnalysisOptions(staging_source="auto" if self.staging.currentIndex() == 0 else "expert",
-                               scoring=self.algo.params(), min_confidence=self.conf_slider.value() / 100.0)
+                               scoring=self.algo.params(), min_confidence=self.conf_slider.value() / 100.0,
+                               confidence_basis=self.conf_basis.currentData())
 
     def run_analysis(self):
         if self.rec:
@@ -1375,7 +1387,8 @@ class MainWindow(QtWidgets.QMainWindow):
         grey = QtGui.QColor("#9aa3ad")
         for r, (e, ok) in enumerate(rows):
             vals = [clock_str(self.rec, e.onset), f"{e.duration:.0f}", EVENT_NAMES[e.code] if ok else "not scored",
-                    f"{e.confidence * 100:.0f}" if ok else "", f"{e.flow_drop * 100:.0f}",
+                    f"{e.confidence * 100:.0f}" if ok else "",
+                    f"{e.probability * 100:.0f}" if e.probability is not None else "", f"{e.flow_drop * 100:.0f}",
                     "" if e.desat is None else f"{e.desat:.1f}", "" if e.desat_nadir is None else f"{e.desat_nadir:.0f}",
                     e.stage or "", (e.notes + (" arousal" if e.arousal else "")) if ok else e.reject_reason]
             for c, v in enumerate(vals):
@@ -1395,6 +1408,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ev_table.setItem(r, c, it)
         self.ev_table.resizeColumnsToContents()
         self.ev_table.setColumnWidth(3, 96)
+        self.ev_table.setColumnWidth(4, 96)
         n = len(self.result.events) if self.result else 0
         self.tabs.setTabText(0, f"Events ({n})")
 

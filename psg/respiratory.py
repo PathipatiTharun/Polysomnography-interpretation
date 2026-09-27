@@ -101,6 +101,7 @@ class RespEvent:
     checks: list[Check] = field(default_factory=list)
     accepted: bool = True
     reject_reason: str = ""
+    probability: float | None = None  # learned P(a technician would score this), when a model exists
 
     @property
     def end(self) -> float:
@@ -213,8 +214,14 @@ class ScoringResult:
     def rejected_events(self) -> list[RespEvent]:
         return [c for c in self.candidates if not c.accepted]
 
-    def events_at_confidence(self, min_conf: float) -> list[RespEvent]:
-        return [e for e in self.events if e.confidence >= min_conf]
+    def events_at_confidence(self, min_conf: float, basis: str = "margin") -> list[RespEvent]:
+        """Scored events at or above a cut-off on the rule-margin confidence, or on the learned
+        probability (`basis='learned'`; falls back to the margin when no model is loaded)."""
+        def score(e: RespEvent) -> float:
+            if basis == "learned" and e.probability is not None:
+                return e.probability
+            return e.confidence
+        return [e for e in self.events if score(e) >= min_conf]
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -593,6 +600,17 @@ def score_from_signals(sg: RespSignals, params: ScoringParams | None = None,
             key = reasons[0] if "wake" in reasons[0] else ("bad flow signal" if "unreliable" in reasons[0]
                                                             else "hypopnea without desaturation/arousal")
             rejected[key] = rejected.get(key, 0) + 1
+
+    # Learned probability from the calibration model, when one has been trained (psg/models).
+    try:
+        from .calibrate import event_features, load_model
+        model = load_model()
+    except Exception:
+        model = None
+    if model is not None and candidates:
+        probs = model.predict(np.array([event_features(c) for c in candidates]))
+        for c, pr in zip(candidates, probs):
+            c.probability = round(float(pr), 3)
 
     return ScoringResult(
         events=events, candidates=candidates, params=p, fs=fs, flow_env=flow_env, flow_baseline=baseline,

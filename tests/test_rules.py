@@ -89,6 +89,23 @@ def test_sleep_rule_begins_or_ends():
     assert len(res.events) == len(EVENTS) - 1
 
 
+def test_logistic_calibration():
+    from psg.calibrate import FEATURES, auc, brier, event_features, fit_logistic
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(400, len(FEATURES)))
+    true_w = np.array([1.0, -0.5, 2.0, 0.3, 1.0, 0.0, -1.0, 0.5])
+    y = (1 / (1 + np.exp(-(X @ true_w))) > rng.random(400)).astype(float)
+    m = fit_logistic(X, y, l2=0.5)
+    p = m.predict(X)
+    assert auc(p, y) > 0.9 and brier(p, y) < 0.15
+    assert np.sign(m.w[2]) > 0 and np.sign(m.w[6]) < 0          # strongest effects recovered
+    rec = _synthetic()
+    res = score_respiratory(rec, ScoringParams(), stages=np.full(int(DUR // 30), STAGE_N2))
+    f = event_features(res.events[0])
+    assert len(f) == len(FEATURES) and all(np.isfinite(f))
+    assert all(e.probability is None or 0.0 <= e.probability <= 1.0 for e in res.events)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

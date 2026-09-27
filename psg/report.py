@@ -178,6 +178,7 @@ def write_html(res: AnalysisResult, path: str | Path, validation: dict | None = 
         return f"<td style='color:{col}' title='{tip}'>{c:.0f}</td>"
     ev_rows = "".join(
         f"<tr><td>{_clock(res, e.onset)}</td><td>{e.duration:.0f}</td><td>{html.escape(e.label)}</td>{conf_cell(e)}"
+        f"<td>{'—' if e.probability is None else f'{e.probability * 100:.0f}'}</td>"
         f"<td>{e.flow_drop * 100:.0f}</td><td>{_num(e.desat)}</td><td>{_num(e.desat_nadir, '{:.0f}')}</td>"
         f"<td>{e.stage or ''}</td><td>{'✓' if e.arousal else ''}</td><td>{html.escape(e.notes)}</td></tr>"
         for e in res.events)
@@ -215,10 +216,12 @@ staging: {html.escape(res.stage_source)} · generated automatically in {res.runt
 {('<h2>Warnings</h2><ul>' + warns + '</ul>') if warns else ''}
 {val_html}
 <h2>Event list ({len(res.events)})</h2>
-<table class="ev"><tr><th>Time</th><th>Dur s</th><th>Type</th><th>Conf %</th><th>Flow ↓%</th><th>Desat %</th><th>Nadir</th><th>Stage</th><th>Arousal</th><th>Notes</th></tr>{ev_rows}</table>
+<table class="ev"><tr><th>Time</th><th>Dur s</th><th>Type</th><th>Conf %</th><th>P(tech) %</th><th>Flow ↓%</th><th>Desat %</th><th>Nadir</th><th>Stage</th><th>Arousal</th><th>Notes</th></tr>{ev_rows}</table>
 <p class="note">Scoring rule: {html.escape(rule)}. Obstructive / central / mixed apneas by thoraco-abdominal effort;
 hypopnea obstructive if snoring, flow flattening, paradox or preserved effort.
 Confidence = smallest margin by which the event clears the rule's thresholds (50 % = exactly at a threshold).
+P(tech) = learned probability that a technician would score the event (logistic regression on the same
+measurements, trained on technician-scored nights with leave-one-night-out validation; see docs/rule_versions.md).
 Severity: AHI &lt;5 normal, 5–15 mild, 15–30 moderate, ≥30 severe.
 This is automated decision support and must be reviewed by a qualified sleep physician.</p>
 </body></html>"""

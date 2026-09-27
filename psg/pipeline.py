@@ -33,6 +33,7 @@ class AnalysisOptions:
     staging: StagingParams = field(default_factory=StagingParams)
     arousal: ArousalParams = field(default_factory=ArousalParams)
     min_confidence: float = 0.0       # events below this confidence are left out of the indices
+    confidence_basis: str = "margin"  # 'margin' (rule thresholds) | 'learned' (logistic model probability)
 
 
 @dataclass
@@ -54,7 +55,7 @@ class AnalysisResult:
     @property
     def events(self) -> list[RespEvent]:
         """Scored events at or above the confidence cut-off (what the indices are built from)."""
-        return self.resp.events_at_confidence(self.options.min_confidence)
+        return self.resp.events_at_confidence(self.options.min_confidence, self.options.confidence_basis)
 
     @property
     def rule_name(self) -> str:
@@ -161,7 +162,8 @@ def make_diagnosis(ix: dict, rule_name: str | None = None, min_confidence: float
     ahi = ix["ahi"]
     findings: list[str] = []
     if rule_name:
-        conf = f", events with confidence ≥ {min_confidence * 100:.0f} %" if min_confidence > 0 else ""
+        basis = "learned probability" if ix.get("confidence_basis") == "learned" else "confidence"
+        conf = f", events with {basis} ≥ {min_confidence * 100:.0f} %" if min_confidence > 0 else ""
         findings.append(f"Scoring rule: {rule_name}{conf}.")
     if not ix.get("respiratory_scored", True):
         findings.append(f"Sleep efficiency {ix['sleep_efficiency']:.0f} %, arousal index {ix['arousal_index']:.1f}/h.")
@@ -296,7 +298,9 @@ def _finish(res: AnalysisResult, quality: dict[str, float]) -> None:
     ix["rule_id"] = opt.scoring.rule_id
     ix["rule_name"] = res.rule_name
     ix["min_confidence"] = opt.min_confidence
-    ix["confidence_counts"] = {lvl: len(resp.events_at_confidence(lvl)) for lvl in CONFIDENCE_LEVELS}
+    ix["confidence_basis"] = opt.confidence_basis
+    ix["confidence_counts"] = {lvl: len(resp.events_at_confidence(lvl, opt.confidence_basis)) for lvl in CONFIDENCE_LEVELS}
+    ix["has_probability"] = any(e.probability is not None for e in resp.events)
     ix["n_scored_all"] = len(resp.events)
     ix["n_rejected"] = len(resp.rejected_events)
     ix["rejected_reasons"] = dict(resp.rejected)
@@ -305,7 +309,7 @@ def _finish(res: AnalysisResult, quality: dict[str, float]) -> None:
 
 
 def rescore_analysis(res: AnalysisResult, scoring: ScoringParams | None = None,
-                     min_confidence: float | None = None) -> AnalysisResult:
+                     min_confidence: float | None = None, confidence_basis: str | None = None) -> AnalysisResult:
     """Apply new rule thresholds and/or a new confidence cut-off to an existing analysis.
 
     Staging, arousals and the prepared respiratory signals are reused, so this takes about a
@@ -313,7 +317,8 @@ def rescore_analysis(res: AnalysisResult, scoring: ScoringParams | None = None,
     """
     scoring = scoring or res.options.scoring
     min_conf = res.options.min_confidence if min_confidence is None else min_confidence
-    opt = dataclasses.replace(res.options, scoring=scoring, min_confidence=min_conf)
+    basis = res.options.confidence_basis if confidence_basis is None else confidence_basis
+    opt = dataclasses.replace(res.options, scoring=scoring, min_confidence=min_conf, confidence_basis=basis)
     t0 = time.time()
     if res.resp.signals is not None:
         resp = rescore(res.resp, scoring)
