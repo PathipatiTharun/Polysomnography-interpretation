@@ -8,9 +8,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from psg.respiratory import RespEvent, ScoringParams
 from psg.rules import DEFAULT_RULE, RULES, RuleVersion, flowchart, get_rule
-
-EVENT_COLORS = {"AO": (31, 119, 180), "AC": (44, 160, 44), "AM": (148, 103, 189),
-                "HO": (255, 127, 14), "HC": (140, 86, 75)}
+from theme import ACCENT, CARD, EVENT_COLORS, INK, LINE, MUTED, SEVERITY_COLORS
 
 
 # ============================================================================ algorithm panel
@@ -417,3 +415,151 @@ class ExplanationPane(QtWidgets.QTextBrowser):
 <tr style='color:#666'><th></th><th align='left'>Criterion</th><th align='left'>Measured</th><th align='left'>Rule</th><th align='left'>Margin</th><th align='left'>Detail</th></tr>
 {''.join(rows)}</table>
 <p style='color:#777;font-size:11px;margin-top:8px'>Margin bar: how far the value clears the threshold (half = exactly at the threshold). Grey bars are informational or type classification and do not affect the confidence.</p>""")
+
+
+# ============================================================================ results header
+
+def _fmt(v, f="{:.1f}", none="—"):
+    if v is None:
+        return none
+    try:
+        if v != v:  # NaN
+            return none
+    except TypeError:
+        pass
+    return f.format(v)
+
+
+class StatTile(QtWidgets.QFrame):
+    def __init__(self, title: str):
+        super().__init__()
+        self.setStyleSheet(f"StatTile{{background:{CARD};border:1px solid {LINE};border-radius:8px}}"
+                           "QLabel{background:transparent;border:none}")
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(12, 8, 12, 8)
+        v.setSpacing(0)
+        self.t = QtWidgets.QLabel(title.upper())
+        self.t.setStyleSheet(f"color:{MUTED};font-size:10px;letter-spacing:0.5px")
+        self.v = QtWidgets.QLabel("—")
+        self.v.setStyleSheet(f"color:{INK};font-size:19px;font-weight:700")
+        self.s = QtWidgets.QLabel("")
+        self.s.setStyleSheet(f"color:{MUTED};font-size:10px")
+        v.addWidget(self.t)
+        v.addWidget(self.v)
+        v.addWidget(self.s)
+
+    def set(self, value: str, sub: str = "", color: str | None = None):
+        self.v.setText(value)
+        self.v.setStyleSheet(f"color:{color or INK};font-size:19px;font-weight:700")
+        self.s.setText(sub)
+        self.s.setVisible(bool(sub))
+
+
+class SummaryBar(QtWidgets.QFrame):
+    """Diagnosis header shown above the signals: severity, the sentence, key indices, confidence."""
+    open_report = QtCore.pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.setStyleSheet(f"SummaryBar{{background:{CARD};border:1px solid {LINE};border-radius:10px}}"
+                           "QLabel{background:transparent;border:none}")
+        h = QtWidgets.QHBoxLayout(self)
+        h.setContentsMargins(14, 10, 14, 10)
+        h.setSpacing(14)
+        self.badge = QtWidgets.QLabel("—")
+        self.badge.setAlignment(QtCore.Qt.AlignCenter)
+        self.badge.setFixedSize(92, 60)
+        h.addWidget(self.badge)
+        text = QtWidgets.QVBoxLayout()
+        text.setSpacing(2)
+        self.primary = QtWidgets.QLabel("No study loaded")
+        self.primary.setStyleSheet(f"font-size:16px;font-weight:700;color:{INK}")
+        self.primary.setWordWrap(True)
+        self.secondary = QtWidgets.QLabel("")
+        self.secondary.setStyleSheet(f"color:{MUTED};font-size:11px")
+        self.secondary.setWordWrap(True)
+        self.chips = QtWidgets.QLabel("")
+        self.chips.setStyleSheet("font-size:11px")
+        text.addWidget(self.primary)
+        text.addWidget(self.secondary)
+        text.addWidget(self.chips)
+        h.addLayout(text, 1)
+        self.tiles = {k: StatTile(t) for k, t in (
+            ("ahi", "AHI"), ("oc", "Obstr. / central AHI"), ("odi", "ODI"), ("nadir", "Nadir SpO2"),
+            ("tst", "Sleep time"), ("ar", "Arousals"))}
+        for tile in self.tiles.values():
+            h.addWidget(tile)
+        self.btn = QtWidgets.QPushButton("Open report")
+        self.btn.setProperty("primary", True)
+        self.btn.clicked.connect(self.open_report.emit)
+        h.addWidget(self.btn)
+        self.clear()
+
+    def clear(self):
+        self._badge("Unknown", "—")
+        self.primary.setText("No study loaded")
+        self.secondary.setText("")
+        self.chips.setText("")
+        for t in self.tiles.values():
+            t.set("—")
+        self.btn.setEnabled(False)
+
+    def _badge(self, severity: str, text: str):
+        col = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["Unknown"])
+        self.badge.setStyleSheet(f"background:{col};color:white;border-radius:8px;font-weight:700;font-size:13px")
+        self.badge.setText(text)
+
+    def set_result(self, res):
+        ix, dg = res.summary, res.diagnosis
+        ox = ix.get("spo2") or {}
+        sev = dg.get("severity", "Unknown")
+        self._badge(sev, sev if sev != "Unknown" else "—")
+        self.primary.setText(dg.get("primary", ""))
+        cc = ix.get("confidence_counts", {})
+        n_all = ix.get("n_scored_all", len(res.events))
+        self.secondary.setText(f"{res.rule_name}  ·  staging: {res.stage_source}  ·  "
+                               f"{len(res.events)} events counted"
+                               + (f" (confidence ≥ {ix.get('min_confidence', 0) * 100:.0f} %)" if ix.get("min_confidence") else "")
+                               + f"  ·  {ix.get('n_rejected', 0)} candidates rejected")
+        def chip(label, n, col):
+            return (f"<span style='background:{col};color:white;border-radius:3px;padding:1px 6px'>{label}</span>"
+                    f"<span style='color:{INK}'> {n}</span>&nbsp;&nbsp;")
+        self.chips.setText("Confidence: " + chip("≥ 90 %", cc.get(0.9, 0), "#2e7d32") + chip("≥ 75 %", cc.get(0.75, 0), "#f9a825")
+                           + chip("all", n_all, MUTED))
+        sev_col = SEVERITY_COLORS.get(sev, INK)
+        self.tiles["ahi"].set(_fmt(ix.get("ahi")), "events / hour of sleep", sev_col)
+        self.tiles["oc"].set(f"{_fmt(ix.get('oahi'))} / {_fmt(ix.get('cahi'))}",
+                             f"{ix.get('n_obstructive_apnea', 0)} OA · {ix.get('n_central_apnea', 0)} CA · {ix.get('n_mixed_apnea', 0)} MA · {ix.get('n_hypopnea', 0)} H")
+        self.tiles["odi"].set(_fmt(ix.get("odi")), f"≥ {res.options.scoring.hypopnea_desat:g} % desaturations / h")
+        nadir = ox.get("nadir")
+        self.tiles["nadir"].set(_fmt(nadir, "{:.0f} %"), f"{_fmt(ox.get('t90_min'))} min below 90 %",
+                                "#c62828" if nadir is not None and nadir < 85 else None)
+        self.tiles["tst"].set(_fmt(ix.get("tst_min"), "{:.0f} min"), f"efficiency {_fmt(ix.get('sleep_efficiency'), '{:.0f}')} %")
+        self.tiles["ar"].set(_fmt(ix.get("arousal_index")), "per hour of sleep")
+        self.btn.setEnabled(True)
+
+
+class ConfidenceDelegate(QtWidgets.QStyledItemDelegate):
+    """Draws the confidence cell as a small bar with the number."""
+
+    def paint(self, painter, option, index):
+        text = index.data()
+        try:
+            v = float(text)
+        except (TypeError, ValueError):
+            return super().paint(painter, option, index)
+        painter.save()
+        if option.state & QtWidgets.QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        r = option.rect.adjusted(6, 8, -34, -8)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor("#e8edf2"))
+        painter.drawRoundedRect(r, 3, 3)
+        col = "#2e7d32" if v >= 90 else ("#f9a825" if v >= 75 else "#c62828")
+        fill = QtCore.QRect(r.left(), r.top(), max(2, int(r.width() * v / 100)), r.height())
+        painter.setBrush(QtGui.QColor(col))
+        painter.drawRoundedRect(fill, 3, 3)
+        painter.setPen(QtGui.QColor(INK))
+        painter.drawText(option.rect.adjusted(0, 0, -6, 0), QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f"{v:.0f}")
+        painter.restore()

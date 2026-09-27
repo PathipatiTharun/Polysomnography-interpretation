@@ -152,7 +152,9 @@ The severity was wrong on both unseen nights, and event-level agreement is much 
 
 ## GUI
 
-- **Overview strip:** whole-night hypnogram, automatic vs expert event rug, SpO2. Click or drag to navigate.
+- **Results header:** severity badge, diagnosis sentence, AHI, obstructive/central AHI, ODI, nadir SpO2, sleep time, arousal index, and how many events are clear-cut (≥ 90 % / ≥ 75 % / all), always visible above the signals.
+- **Overview strip:** stage-coloured hypnogram, automatic vs technician event rug, SpO2 with the time below 90 % filled red. Click or drag to navigate.
+- **Signal view:** coloured sleep-stage strip with epoch numbers above the traces, 30-s epoch grid, a time cursor across all channels, channel labels with units and amplitude scale, traces coloured by role. Hover an event for its summary; click it to select it, which highlights it, explains it and shows its path in the flowchart.
 - **Signal view:** stacked channels with AASM display filters and 10 s to 10 min pages.
   - Colour-coded scored events on the respiratory channels, arousals shaded on the EEG, technician events drawn as bars for comparison.
   - "Show flow envelope" overlays the breath amplitude with the baseline and the 30 % / 90 % thresholds, so you can see *why* an event was scored.

@@ -29,19 +29,12 @@ from psg.pipeline import AnalysisOptions, AnalysisResult, analyze, rescore_analy
 from psg.report import write_events_csv, write_html, write_json
 from psg.respiratory import ScoringParams
 from psg.study import ACCEPTED_SUFFIXES, StudyError, list_studies, process_study
-from widgets import AlgorithmPanel, ExplanationPane, FlowchartView
+from theme import (ACCENT, CHANNEL_COLORS, DEFAULT_TRACE, EVENT_COLORS, EVENT_NAMES, MUTED, SEVERITY_COLORS,
+                   STAGE_COLORS, STAGE_TEXT, apply_theme, hex_to_rgb)
+from widgets import AlgorithmPanel, ConfidenceDelegate, ExplanationPane, FlowchartView, SummaryBar
 
 APP_NAME = "PSG Interpreter"
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
-SEVERITY_COLORS = {"Normal": "#2e7d32", "Mild": "#f9a825", "Moderate": "#ef6c00", "Severe": "#c62828"}
-
-# Display colours per event code (fill with alpha).
-EVENT_COLORS = {
-    "AO": (31, 119, 180), "AC": (44, 160, 44), "AM": (148, 103, 189),
-    "HO": (255, 127, 14), "HC": (140, 86, 75),
-}
-EVENT_NAMES = {"AO": "Obstructive apnea", "AC": "Central apnea", "AM": "Mixed apnea",
-               "HO": "Obstructive hypopnea", "HC": "Central hypopnea"}
 STAGE_Y = {0: 4, 4: 3, 1: 2, 2: 1, 3: 0, -1: np.nan}  # clinical hypnogram order: W R N1 N2 N3
 
 # AASM-recommended display filters per role (low, high) in Hz; None = raw.
@@ -127,32 +120,38 @@ class Overview(pg.GraphicsLayoutWidget):
     def __init__(self, get_rec):
         super().__init__()
         self.setBackground("w")
-        self.setFixedHeight(250)
+        self.setFixedHeight(236)
+        self.ci.layout.setContentsMargins(6, 4, 10, 2)
+        self.ci.layout.setSpacing(0)
         self.hyp = self.addPlot(row=0, col=0, axisItems={"bottom": TimeAxis(get_rec)})
         self.hyp.getAxis("left").setTicks([[(4, "W"), (3, "R"), (2, "N1"), (1, "N2"), (0, "N3")]])
-        self.hyp.setYRange(-0.5, 4.5, padding=0)
+        self.hyp.setYRange(-0.6, 4.6, padding=0)
         self.hyp.setMouseEnabled(x=False, y=False)
         self.hyp.hideButtons()
-        self.hyp.getAxis("left").setWidth(48)
+        self.hyp.getAxis("left").setWidth(52)
         self.ev = self.addPlot(row=1, col=0)
         self.ev.setXLink(self.hyp)
         self.ev.hideAxis("bottom")
         self.ev.getAxis("left").setTicks([[(1.5, "Auto"), (0.5, "Expert")]])
-        self.ev.getAxis("left").setWidth(48)
+        self.ev.getAxis("left").setWidth(52)
         self.ev.setYRange(0, 2, padding=0)
         self.ev.setMouseEnabled(x=False, y=False)
         self.ev.hideButtons()
         self.sp = self.addPlot(row=2, col=0)
         self.sp.setXLink(self.hyp)
         self.sp.hideAxis("bottom")
-        self.sp.getAxis("left").setWidth(48)
-        self.sp.setLabel("left", "SpO2")
+        self.sp.getAxis("left").setWidth(52)
+        self.sp.setLabel("left", "SpO2 %")
         self.sp.setMouseEnabled(x=False, y=False)
         self.sp.hideButtons()
+        for p in (self.hyp, self.ev, self.sp):
+            for side in ("left", "bottom"):
+                p.getAxis(side).setPen(pg.mkPen("#c9d3de"))
+                p.getAxis(side).setTextPen(pg.mkPen(MUTED))
         self.ci.layout.setRowStretchFactor(0, 3)
         self.ci.layout.setRowStretchFactor(1, 1)
         self.ci.layout.setRowStretchFactor(2, 2)
-        self.region = pg.LinearRegionItem(brush=(255, 200, 0, 70), movable=True)
+        self.region = pg.LinearRegionItem(brush=(31, 111, 178, 45), pen=pg.mkPen(ACCENT, width=1.2), movable=True)
         self.region.setZValue(10)
         self.hyp.addItem(self.region)
         self.region.sigRegionChangeFinished.connect(self._region_moved)
@@ -196,16 +195,19 @@ class Overview(pg.GraphicsLayoutWidget):
         self.hyp.setXRange(0, dur, padding=0)
         st = stages if stages is not None else rec.expert_stages
         if st is not None:
+            st = np.asarray(st, dtype=int)
             t = np.arange(len(st) + 1) * EPOCH_S
             y = np.array([STAGE_Y[int(s)] for s in st] + [STAGE_Y[int(st[-1])]], dtype=float)
-            self._add(self.hyp, pg.PlotDataItem(t, y, stepMode="left",
-                                                pen=pg.mkPen("#333", width=1)))
-            rem = np.flatnonzero(np.asarray(st) == 4)
-            if rem.size:
-                xs = np.repeat(rem * EPOCH_S, 2) + np.tile([0, EPOCH_S], rem.size)
-                ys = np.full(xs.size, 3.0)
-                conn = np.tile([1, 0], rem.size).astype(bool)
-                self._add(self.hyp, pg.PlotDataItem(xs, ys, connect=conn, pen=pg.mkPen("#d62728", width=4)))
+            # Thin connecting step line plus a coloured block per epoch at its stage level.
+            self._add(self.hyp, pg.PlotDataItem(t, y, stepMode="left", pen=pg.mkPen("#b8c2cc", width=1)))
+            for code, col in STAGE_COLORS.items():
+                idx = np.flatnonzero(st == code)
+                if idx.size == 0 or code == -1:
+                    continue
+                yl = STAGE_Y[code]
+                bars = pg.BarGraphItem(x0=idx * EPOCH_S, x1=(idx + 1) * EPOCH_S, y0=yl - 0.38, y1=yl + 0.38,
+                                       brush=pg.mkBrush(col), pen=pg.mkPen(None))
+                self._add(self.hyp, bars)
         if spo2 is None:
             ch = rec.get("spo2")
             if ch is not None:
@@ -214,7 +216,15 @@ class Overview(pg.GraphicsLayoutWidget):
             step = max(int(spo2_fs), 1)
             s = np.asarray(spo2[::step], dtype=float)
             s = np.where((s > 50) & (s <= 100), s, np.nan)
-            self._add(self.sp, pg.PlotDataItem(np.arange(len(s)), s, pen=pg.mkPen("#1f77b4", width=1), connect="finite"))
+            x = np.arange(len(s))
+            curve = pg.PlotDataItem(x, s, pen=pg.mkPen(ACCENT, width=1), connect="finite")
+            self._add(self.sp, curve)
+            # Red fill for the time spent below 90 %.
+            below = pg.PlotDataItem(x, np.fmin(s, 90.0), pen=None, connect="finite")
+            ref = pg.PlotDataItem(x, np.full(len(s), 90.0), pen=pg.mkPen("#d62728", width=0.8, style=QtCore.Qt.DashLine))
+            self._add(self.sp, below)
+            self._add(self.sp, ref)
+            self._add(self.sp, pg.FillBetweenItem(ref, below, brush=(214, 39, 40, 90)))
             lo = np.nanpercentile(s, 0.5) if np.isfinite(s).any() else 80
             self.sp.setYRange(max(min(lo - 2, 88), 50), 100, padding=0)
         self.set_window(0, 30)
@@ -227,64 +237,120 @@ class Overview(pg.GraphicsLayoutWidget):
                 by.setdefault(getcode(e), []).append(e)
             for code, lst in by.items():
                 xs = np.array([[e.onset, e.onset] for e in lst]).ravel()
-                ys = np.tile([row + 0.1, row + 0.9], len(lst))
+                ys = np.tile([row + 0.12, row + 0.88], len(lst))
                 conn = np.tile([1, 0], len(lst)).astype(bool)
-                self._add(self.ev, pg.PlotDataItem(xs, ys, connect=conn, pen=pg.mkPen(EVENT_COLORS.get(code, (0, 0, 0)), width=1)))
+                self._add(self.ev, pg.PlotDataItem(xs, ys, connect=conn, pen=pg.mkPen(EVENT_COLORS.get(code, (0, 0, 0)), width=1.2)))
+
+
+def _scale_text(spread: float, unit: str) -> str:
+    """Human amplitude scale for the channel label, e.g. '±120 µV' or '±0.35'."""
+    if spread <= 0 or not np.isfinite(spread):
+        return ""
+    if spread >= 100:
+        s = f"{spread:.0f}"
+    elif spread >= 10:
+        s = f"{spread:.1f}"
+    else:
+        s = f"{spread:.2g}"
+    u = unit.replace("uV", "µV")
+    return f"±{s} {u}".strip()
 
 
 class SignalView(QtWidgets.QScrollArea):
-    """Stacked per-channel plots sharing a time axis."""
+    """Stacked per-channel traces sharing a time axis, with a sleep-stage strip, epoch grid,
+    a time cursor across all channels, hover information and click-to-select events."""
+    event_clicked = QtCore.pyqtSignal(object)   # RespEvent under the mouse
+    cursor_moved = QtCore.pyqtSignal(float)     # time (s) under the mouse, -1 when outside
+
     def __init__(self, get_rec):
         super().__init__()
         self.setWidgetResizable(True)
+        self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.glw = pg.GraphicsLayoutWidget()
         self.glw.setBackground("w")
+        self.glw.ci.layout.setContentsMargins(6, 2, 10, 2)
+        self.glw.ci.layout.setSpacing(0)
         self.setWidget(self.glw)
         self.get_rec = get_rec
         self.plots: dict[str, pg.PlotItem] = {}
         self.curves: dict[str, pg.PlotDataItem] = {}
+        self.labels: dict[str, pg.TextItem] = {}
+        self.cursors: list[pg.InfiniteLine] = []
         self.overlays: list[tuple[pg.PlotItem, object]] = []
+        self.stage_plot: pg.PlotItem | None = None
+        self.hover: pg.TextItem | None = None
         self.gain = 1.0
-        self.row_height = 70
+        self.row_height = 72
+        self.selected = None
+        self._events_on_page: list = []
+        self._range = (0.0, 30.0)
+        self.glw.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.glw.scene().sigMouseClicked.connect(self._mouse_clicked)
+
+    # -- construction ---------------------------------------------------------------------
+    def _new_plot(self, row: int, axis_items=None) -> pg.PlotItem:
+        p = self.glw.addPlot(row=row, col=0, axisItems=axis_items or {})
+        p.setMenuEnabled(False)
+        p.hideButtons()
+        p.setMouseEnabled(x=False, y=False)
+        p.hideAxis("left")
+        p.hideAxis("bottom")
+        p.setClipToView(True)
+        p.vb.setBorder(pg.mkPen("#e6ebf1"))
+        return p
 
     def build(self, rec: Recording, labels: list[str]):
         self.glw.clear()
         self.plots.clear()
         self.curves.clear()
+        self.labels.clear()
+        self.cursors.clear()
         self.overlays.clear()
-        first = None
+        self.hover = None
+        # Row 0: sleep-stage strip (one coloured block per 30-s epoch).
+        self.stage_plot = self._new_plot(0)
+        self.stage_plot.setYRange(0, 1, padding=0)
+        self.stage_plot.setFixedHeight(22)
+        first = self.stage_plot
         for i, label in enumerate(labels):
             ch = rec.channels[label]
             last = i == len(labels) - 1
-            axis = {"bottom": TimeAxis(self.get_rec)} if last else {}
-            p = self.glw.addPlot(row=i, col=0, axisItems=axis)
-            p.setMenuEnabled(False)
-            p.hideButtons()
-            p.setMouseEnabled(x=False, y=True)
-            p.showGrid(x=True, y=False, alpha=0.3)
-            if not last:
-                p.hideAxis("bottom")
-            ax = p.getAxis("left")
-            ax.setWidth(80)
-            ax.setStyle(showValues=False)
-            ax.enableAutoSIPrefix(False)
-            p.setLabel("left", f"<span style='font-size:8pt'>{label}</span>")
-            p.setClipToView(True)
+            p = self._new_plot(i + 1, {"bottom": TimeAxis(self.get_rec)} if last else None)
+            if last:
+                p.showAxis("bottom")
+                p.getAxis("bottom").setPen(pg.mkPen("#c9d3de"))
+                p.getAxis("bottom").setTextPen(pg.mkPen(MUTED))
             p.setDownsampling(auto=True, mode="peak")
-            c = p.plot(pen=pg.mkPen("#222", width=1))
+            p.setXLink(first)
+            col = CHANNEL_COLORS.get(ch.role or "", DEFAULT_TRACE)
+            c = p.plot(pen=pg.mkPen(col, width=1))
+            lab = pg.TextItem(anchor=(0, 0), fill=(255, 255, 255, 215))
+            lab.setZValue(30)
+            p.addItem(lab, ignoreBounds=True)
+            if ch.role == "spo2":
+                p.addItem(pg.InfiniteLine(90, angle=0, pen=pg.mkPen("#d62728", width=0.8, style=QtCore.Qt.DashLine)))
+            cur = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((31, 111, 178, 170), width=1))
+            cur.setZValue(25)
+            p.addItem(cur, ignoreBounds=True)
+            self.cursors.append(cur)
             self.plots[label] = p
             self.curves[label] = c
-            if first is None:
-                first = p
-            else:
-                p.setXLink(first)
-        self.glw.setMinimumHeight(self.row_height * max(len(labels), 1) + 30)
+            self.labels[label] = lab
+        cur = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((31, 111, 178, 170), width=1))
+        self.stage_plot.addItem(cur, ignoreBounds=True)
+        self.cursors.append(cur)
+        self.glw.setMinimumHeight(self.row_height * max(len(labels), 1) + 60)
 
+    # -- drawing --------------------------------------------------------------------------
     def draw(self, rec: Recording, display: dict, t0: float, t1: float, result: AnalysisResult | None,
              show_expert: bool, show_derived: bool, show_rejected: bool = False):
+        self._range = (t0, t1)
         for p, it in self.overlays:
             p.removeItem(it)
         self.overlays.clear()
+        self._events_on_page = []
+        self._draw_stage_strip(rec, t0, t1, result)
+        epoch_lines = np.arange(np.ceil(t0 / EPOCH_S) * EPOCH_S, t1, EPOCH_S) if (t1 - t0) >= EPOCH_S else []
         for label, p in self.plots.items():
             ch = rec.channels[label]
             i0, i1 = max(int(t0 * ch.fs), 0), min(int(t1 * ch.fs) + 1, len(ch.data))
@@ -292,11 +358,13 @@ class SignalView(QtWidgets.QScrollArea):
             x = np.arange(i0, i1) / ch.fs
             self.curves[label].setData(x, y)
             p.setXRange(t0, t1, padding=0)
+            scale = ""
             if y.size:
                 if ch.role == "spo2":
                     fin = y[np.isfinite(y) & (y > 50)]
                     lo = min(float(fin.min()) - 2, 88) if fin.size else 80
                     p.setYRange(max(lo, 50), 100, padding=0)
+                    scale = f"{max(lo, 50):.0f}–100 %"
                 elif ch.role == "position":
                     p.setYRange(0, 5, padding=0)
                 else:
@@ -304,25 +372,40 @@ class SignalView(QtWidgets.QScrollArea):
                     spread = float(np.nanpercentile(np.abs(y - med), 99)) or 1.0
                     spread /= self.gain
                     p.setYRange(med - spread, med + spread, padding=0.05)
+                    scale = _scale_text(spread, ch.unit)
+            ymin, ymax = p.vb.viewRange()[1]
+            col = CHANNEL_COLORS.get(ch.role or "", DEFAULT_TRACE)
+            self.labels[label].setHtml(f"<span style='font-size:9pt;font-weight:600;color:{col}'>{label}</span>"
+                                       f"<span style='font-size:8pt;color:{MUTED}'>&nbsp;&nbsp;{scale}</span>")
+            self.labels[label].setPos(t0, ymax)
+            for xe in epoch_lines:
+                ln = pg.InfiniteLine(xe, angle=90, pen=pg.mkPen("#e3e8ee", width=1, style=QtCore.Qt.DashLine))
+                ln.setZValue(-20)
+                self._add(p, ln)
         if result is None and not (show_expert and rec.expert_events):
             return
-        # Event shading on respiratory channels, arousal marks on EEG.
-        resp_labels = [l for l, p in self.plots.items() if rec.channels[l].role in RESP_ROLES]
-        eeg_labels = [l for l, p in self.plots.items() if rec.channels[l].role in ("eeg", "eeg2")]
+        resp_labels = [l for l in self.plots if rec.channels[l].role in RESP_ROLES]
+        eeg_labels = [l for l in self.plots if rec.channels[l].role in ("eeg", "eeg2")]
         if result is not None:
             for e in result.events:
                 if e.end < t0 or e.onset > t1:
                     continue
+                self._events_on_page.append(e)
                 col = EVENT_COLORS[e.code]
+                sel = e is self.selected
                 for l in resp_labels:
-                    r = pg.LinearRegionItem((e.onset, e.end), movable=False, brush=(*col, 60), pen=pg.mkPen((*col, 160)))
+                    r = pg.LinearRegionItem((e.onset, e.end), movable=False, brush=(*col, 85 if sel else 55),
+                                            pen=pg.mkPen((*col, 230 if sel else 150), width=2 if sel else 1))
                     r.setZValue(-10)
                     self._add(self.plots[l], r)
                 if resp_labels:
                     p = self.plots[resp_labels[0]]
-                    txt = pg.TextItem(f"{e.code}  {e.duration:.0f}s" + (f"  -{e.desat:.0f}%" if e.desat else "")
-                                      + f"  ·{e.confidence * 100:.0f}%", color=col, anchor=(0, 0))
-                    txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][1])
+                    dense = (t1 - t0) > 130           # long pages: short codes so labels do not overlap
+                    text = (f"{e.code} {e.duration:.0f}s" if dense else
+                            f"{EVENT_NAMES[e.code]}  {e.duration:.0f} s" + (f"  SpO2 −{e.desat:.0f}%" if e.desat else "")
+                            + f"  ·  {e.confidence * 100:.0f}%")
+                    txt = pg.TextItem(text, color=col, anchor=(0, 1), fill=(255, 255, 255, 190))
+                    txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][0])
                     self._add(p, txt)
             if show_rejected:
                 # Candidates that failed the rule (or fell under the confidence cut-off): grey, with the reason.
@@ -330,51 +413,134 @@ class SignalView(QtWidgets.QScrollArea):
                 for e in result.resp.candidates:
                     if id(e) in shown or e.end < t0 or e.onset > t1:
                         continue
+                    self._events_on_page.append(e)
                     for l in resp_labels:
-                        r = pg.LinearRegionItem((e.onset, e.end), movable=False, brush=(120, 120, 120, 35),
-                                                pen=pg.mkPen((120, 120, 120, 140), style=QtCore.Qt.DashLine))
+                        r = pg.LinearRegionItem((e.onset, e.end), movable=False, brush=(120, 120, 120, 30),
+                                                pen=pg.mkPen((120, 120, 120, 150), style=QtCore.Qt.DashLine))
                         r.setZValue(-10)
                         self._add(self.plots[l], r)
                     if resp_labels:
                         p = self.plots[resp_labels[0]]
                         why = e.reject_reason if not e.accepted else f"below confidence cut-off ({e.confidence * 100:.0f}%)"
-                        txt = pg.TextItem(f"not scored: {why}", color=(110, 110, 110), anchor=(0, 0))
-                        txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][1])
+                        txt = pg.TextItem(f"not scored: {why}", color=(110, 110, 110), anchor=(0, 1), fill=(255, 255, 255, 190))
+                        txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][0])
                         self._add(p, txt)
             for (a, d) in result.arousals:
                 if a + d < t0 or a > t1:
                     continue
                 for l in eeg_labels:
-                    r = pg.LinearRegionItem((a, a + d), movable=False, brush=(214, 39, 40, 40), pen=pg.mkPen((214, 39, 40, 120)))
+                    r = pg.LinearRegionItem((a, a + d), movable=False, brush=(214, 39, 40, 35), pen=pg.mkPen((214, 39, 40, 120)))
                     r.setZValue(-10)
                     self._add(self.plots[l], r)
+                if eeg_labels:
+                    p = self.plots[eeg_labels[0]]
+                    t = pg.TextItem("arousal", color=(214, 39, 40), anchor=(0, 1))
+                    t.setPos(max(a, t0), p.vb.viewRange()[1][0])
+                    self._add(p, t)
             if show_derived and rec.roles.get("flow") in self.plots and result.resp.fs > 1:
-                # Breath amplitude envelope and the 30 % / 90 % reduction thresholds.
+                # Breath amplitude envelope and the hypopnea / apnea reduction thresholds.
                 p = self.plots[rec.roles["flow"]]
                 fs = result.resp.fs
+                sp = result.options.scoring
                 i0, i1 = max(int(t0 * fs), 0), min(int(t1 * fs) + 1, len(result.resp.flow_env))
                 x = np.arange(i0, i1) / fs
                 base = result.resp.flow_baseline[i0:i1] / 2
                 env = (result.resp.flow_env[i0:i1] + result.resp.noise_floor) / 2
                 for yy, pen in ((env, pg.mkPen((0, 150, 0), width=1.5)),
                                 (base, pg.mkPen((0, 0, 200), width=1, style=QtCore.Qt.DashLine)),
-                                (base * 0.7, pg.mkPen((255, 127, 14), width=1, style=QtCore.Qt.DotLine)),
-                                (base * 0.1, pg.mkPen((200, 0, 0), width=1, style=QtCore.Qt.DotLine))):
+                                (base * (1 - sp.hypopnea_drop), pg.mkPen((255, 127, 14), width=1, style=QtCore.Qt.DotLine)),
+                                (base * (1 - sp.apnea_drop), pg.mkPen((200, 0, 0), width=1, style=QtCore.Qt.DotLine))):
                     self._add(p, pg.PlotDataItem(x, yy, pen=pen))
         if show_expert and rec.expert_events and resp_labels:
-            p = self.plots[resp_labels[0]]
+            p = self.plots[resp_labels[-1]]
             ymin, ymax = p.vb.viewRange()[1]
             for e in rec.expert_events:
                 if e.end < t0 or e.onset > t1:
                     continue
                 code = ("A" if e.kind == "apnea" else "H") + (e.subtype[0].upper() if e.subtype != "unknown" else "O")
                 col = EVENT_COLORS.get(code, (0, 0, 0))
-                y = ymin + 0.04 * (ymax - ymin)
+                y = ymin + 0.06 * (ymax - ymin)
                 bar = pg.PlotDataItem([e.onset, e.end], [y, y], pen=pg.mkPen(col, width=5))
                 self._add(p, bar)
-                t = pg.TextItem(f"expert {code}", color=col, anchor=(0, 1))
-                t.setPos(e.onset, y)
+                t = pg.TextItem(f"technician {code}", color=col, anchor=(0, 1))
+                t.setPos(max(e.onset, t0), y)
                 self._add(p, t)
+
+    def _draw_stage_strip(self, rec: Recording, t0: float, t1: float, result):
+        sp = self.stage_plot
+        if sp is None:
+            return
+        sp.setXRange(t0, t1, padding=0)
+        stages = result.stages if result is not None else rec.expert_stages
+        k0, k1 = int(t0 // EPOCH_S), int(np.ceil(t1 / EPOCH_S))
+        if stages is None:
+            return
+        for k in range(k0, k1):
+            if not (0 <= k < len(stages)):
+                continue
+            code = int(stages[k])
+            bar = pg.BarGraphItem(x0=[k * EPOCH_S], x1=[(k + 1) * EPOCH_S], y0=[0], y1=[1],
+                                  brush=pg.mkBrush(STAGE_COLORS.get(code, "#eee")), pen=pg.mkPen("white"))
+            self._add(sp, bar)
+            if (t1 - t0) <= 620:
+                dark = code in (2, 3, 4)
+                t = pg.TextItem(f"{STAGE_TEXT.get(code, '?')}  ·  epoch {k + 1}", color="white" if dark else "#334",
+                                anchor=(0, 0.5))
+                t.setPos(max(k * EPOCH_S, t0) + 0.3, 0.5)
+                self._add(sp, t)
+
+    # -- interaction ----------------------------------------------------------------------
+    def _time_at(self, scene_pos) -> float | None:
+        for p in list(self.plots.values()) + ([self.stage_plot] if self.stage_plot else []):
+            if p is not None and p.sceneBoundingRect().contains(scene_pos):
+                return float(p.vb.mapSceneToView(scene_pos).x())
+        return None
+
+    def _event_at(self, t: float):
+        hits = [e for e in self._events_on_page if e.onset <= t <= e.end]
+        return min(hits, key=lambda e: e.duration) if hits else None
+
+    def _mouse_moved(self, pos):
+        t = self._time_at(pos)
+        if t is None:
+            for c in self.cursors:
+                c.hide()
+            self.cursor_moved.emit(-1.0)
+            return
+        for c in self.cursors:
+            c.show()
+            c.setPos(t)
+        self.cursor_moved.emit(t)
+        e = self._event_at(t)
+        if self.hover is not None:
+            try:
+                self.hover.scene().removeItem(self.hover)
+            except Exception:
+                pass
+            self.hover = None
+        if e is not None and self.plots:
+            p = list(self.plots.values())[0]
+            txt = (f"{EVENT_NAMES[e.code]} · {e.duration:.0f} s · flow −{e.flow_drop * 100:.0f}%"
+                   + (f" · SpO2 −{e.desat:.1f}%" if e.desat else "") + f" · confidence {e.confidence * 100:.0f}%"
+                   if e.accepted else f"Not scored: {e.reject_reason}")
+            # Anchored at the top-centre of the first trace and hanging downwards; nudged inside the page
+            # near the edges so it is never clipped.
+            t0, t1 = self._range
+            ax = 0.0 if t < t0 + 0.12 * (t1 - t0) else (1.0 if t > t1 - 0.12 * (t1 - t0) else 0.5)
+            self.hover = pg.TextItem(txt, color="white", fill=(27, 42, 58, 220), anchor=(ax, 0))
+            self.hover.setZValue(40)
+            self.hover.setPos(t, p.vb.viewRange()[1][1])
+            p.addItem(self.hover, ignoreBounds=True)
+
+    def _mouse_clicked(self, ev):
+        if ev.button() != QtCore.Qt.LeftButton:
+            return
+        t = self._time_at(ev.scenePos())
+        if t is None:
+            return
+        e = self._event_at(t)
+        if e is not None:
+            self.event_clicked.emit(e)
 
     def _add(self, plot, item):
         plot.addItem(item)
@@ -693,54 +859,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self.processing = ProcessingPage()
         viewer = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(viewer)
-        v.setContentsMargins(4, 4, 4, 4)
+        v.setContentsMargins(8, 8, 8, 4)
+        v.setSpacing(6)
+        self.summary = SummaryBar()
+        self.summary.open_report.connect(self.open_saved_report)
+        v.addWidget(self.summary)
+        ov_card = QtWidgets.QFrame()
+        ov_card.setStyleSheet("QFrame{background:white;border:1px solid #dde3ea;border-radius:10px}")
+        ovl = QtWidgets.QVBoxLayout(ov_card)
+        ovl.setContentsMargins(4, 4, 4, 2)
         self.overview = Overview(lambda: self.rec)
         self.overview.seek.connect(self.center_on)
-        v.addWidget(self.overview)
+        ovl.addWidget(self.overview)
+        v.addWidget(ov_card)
         self.pos_label = QtWidgets.QLabel("")
-        self.pos_label.setStyleSheet("color:#444;padding:2px")
+        self.pos_label.setStyleSheet(f"color:{MUTED};padding:0 4px")
         v.addWidget(self.pos_label)
+        sig_card = QtWidgets.QFrame()
+        sig_card.setStyleSheet("QFrame{background:white;border:1px solid #dde3ea;border-radius:10px}")
+        sgl = QtWidgets.QVBoxLayout(sig_card)
+        sgl.setContentsMargins(4, 4, 4, 4)
         self.view = SignalView(lambda: self.rec)
-        v.addWidget(self.view, 1)
+        self.view.event_clicked.connect(self._on_trace_event)
+        self.view.cursor_moved.connect(self._on_cursor)
+        sgl.addWidget(self.view)
+        v.addWidget(sig_card, 1)
         for w in (self.home, self.processing, viewer):
             self.stack.addWidget(w)
         self.viewer = viewer
         self.setCentralWidget(self.stack)
 
-        # Right: tabs.
-        dock = QtWidgets.QDockWidget("Analysis", self)
+        # Right: results tabs.
+        dock = QtWidgets.QDockWidget("Results", self)
         dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
         self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
         dock.setWidget(self.tabs)
-        dock.setMinimumWidth(460)
+        dock.setMinimumWidth(470)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
         self.dock = dock
 
-        # Left: algorithm (published rule version + threshold sliders).
+        # Left: data & algorithm (rule version + threshold sliders, channel montage).
         self.algo = AlgorithmPanel()
         self.algo.params_changed.connect(self._params_changed)
-        algo_dock = QtWidgets.QDockWidget("Algorithm", self)
-        algo_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
-        algo_dock.setWidget(self.algo)
-        algo_dock.setMinimumWidth(340)
-        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, algo_dock)
-        self.algo_dock = algo_dock
-
-        # Channels tab.
+        left_tabs = QtWidgets.QTabWidget()
+        left_tabs.setDocumentMode(True)
+        left_tabs.addTab(self.algo, "Algorithm")
         w = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(w)
+        lv.setContentsMargins(8, 8, 8, 8)
         self.ch_list = QtWidgets.QListWidget()
         self.ch_list.itemChanged.connect(self._channels_changed)
-        lv.addWidget(QtWidgets.QLabel("Tick channels to display (role detected automatically):"))
+        hint = QtWidgets.QLabel("Tick the channels to display. Roles are detected from the channel names; "
+                                "traces are coloured by role.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{MUTED}")
+        lv.addWidget(hint)
         lv.addWidget(self.ch_list, 1)
         row = QtWidgets.QHBoxLayout()
-        for text, fn in (("Defaults", self._select_default), ("All", lambda: self._select_all(True)),
-                         ("None", lambda: self._select_all(False)), ("Respiratory", self._select_resp)):
+        for text, fn in (("Defaults", self._select_default), ("Respiratory", self._select_resp),
+                         ("All", lambda: self._select_all(True)), ("None", lambda: self._select_all(False))):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(fn)
             row.addWidget(b)
         lv.addLayout(row)
-        self.tabs.addTab(w, "Channels")
+        left_tabs.addTab(w, "Channels")
+        self.left_tabs = left_tabs
+        algo_dock = QtWidgets.QDockWidget("Data & algorithm", self)
+        algo_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
+        algo_dock.setWidget(left_tabs)
+        algo_dock.setMinimumWidth(350)
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, algo_dock)
+        self.algo_dock = algo_dock
 
         # Events tab: confidence cut-off, filter, table, explanation of the selected event.
         w = QtWidgets.QWidget()
@@ -780,15 +970,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ev_table.setSortingEnabled(False)
         self.ev_table.cellDoubleClicked.connect(self._event_clicked)
         self.ev_table.cellClicked.connect(self._event_clicked)
+        self.ev_table.setItemDelegateForColumn(3, ConfidenceDelegate(self.ev_table))
+        self.ev_table.setAlternatingRowColors(True)
         split.addWidget(self.ev_table)
         self.explain = ExplanationPane()
         split.addWidget(self.explain)
         split.setSizes([420, 260])
         lv.addWidget(split, 1)
         legend = QtWidgets.QLabel(" ".join(
-            f"<span style='background:rgb{c};color:white;padding:1px 4px'>{k}</span> {EVENT_NAMES[k]}&nbsp;&nbsp;"
+            f"<span style='background:rgb{c};color:white;border-radius:3px;padding:1px 5px'>{k}</span> {EVENT_NAMES[k]}&nbsp;&nbsp;"
             for k, c in EVENT_COLORS.items()))
         legend.setWordWrap(True)
+        legend.setStyleSheet(f"color:{MUTED};font-size:11px")
         lv.addWidget(legend)
         self.tabs.addTab(w, "Events")
 
@@ -873,6 +1066,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _refresh_results(self, status: str = ""):
         res = self.result
+        self.summary.set_result(res)
         self.overview.show_events(res.events, self.rec.expert_events)
         self._fill_events()
         self.report.setHtml(self._report_html(res))
@@ -1017,13 +1211,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def _show_recording(self, rec: Recording, display: dict):
         self.rec, self.display = rec, display
         self.result = None
+        self.summary.clear()
         self.setWindowTitle(f"{APP_NAME} — {rec.name}")
         self.ch_list.blockSignals(True)
         self.ch_list.clear()
         role_of = {v: k for k, v in rec.roles.items()}
         for label, ch in rec.channels.items():
             role = role_of.get(label)
-            it = QtWidgets.QListWidgetItem(f"{label}   ({ch.fs:g} Hz{', ' + role if role else ''})")
+            it = QtWidgets.QListWidgetItem(f"{label}   ·  {ch.fs:g} Hz{'  ·  ' + role.replace('_', ' ') if role else ''}")
+            it.setForeground(QtGui.QColor(CHANNEL_COLORS.get(role or "", DEFAULT_TRACE)))
             it.setData(QtCore.Qt.UserRole, label)
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Unchecked)
@@ -1113,15 +1309,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view.draw(self.rec, self.display, self.t0, t1, self.result,
                        self.chk_expert.isChecked(), self.chk_derived.isChecked(), self.chk_rejected.isChecked())
         self.overview.set_window(self.t0, t1)
-        ep = int(self.t0 // EPOCH_S) + 1
-        stage = ""
-        st = self.result.stages if self.result is not None else self.rec.expert_stages
-        if st is not None and ep - 1 < len(st):
-            stage = f" | stage {STAGE_NAMES[int(st[ep - 1])]}"
-            if self.result is not None and self.rec.expert_stages is not None and ep - 1 < len(self.rec.expert_stages):
-                stage += f" (expert {STAGE_NAMES[int(self.rec.expert_stages[ep - 1])]})"
-        self.pos_label.setText(f"{clock_str(self.rec, self.t0)} – {clock_str(self.rec, t1)}   |   epoch {ep} / "
-                               f"{self.rec.n_epochs}{stage}   |   ←/→ page, N/P next/prev event, +/- amplitude")
+        self.pos_label.setText(self._pos_text())
 
     # --------------------------------------------------------------------- analysis
     def _options(self):
@@ -1138,8 +1326,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flow.set_params(res.options.scoring)
         self.flow.highlight(None)
         self.explain.clear_event()
+        self.view.selected = None
         self._refresh_results()
-        self.tabs.setCurrentIndex(2)
+        self.tabs.setCurrentIndex(0)
         self.statusBar().showMessage(f"{res.diagnosis['primary']}  —  {len(res.events)} events, analysis {res.runtime_s:.0f} s")
 
     def _filtered_events(self):
@@ -1184,12 +1373,55 @@ class MainWindow(QtWidgets.QMainWindow):
                         it.setToolTip(f"Limited by {lim.label.lower()}: {lim.text()}")
                 self.ev_table.setItem(r, c, it)
         self.ev_table.resizeColumnsToContents()
+        self.ev_table.setColumnWidth(3, 96)
         n = len(self.result.events) if self.result else 0
-        self.tabs.setTabText(1, f"Events ({n})")
+        self.tabs.setTabText(0, f"Events ({n})")
 
     def _show_event_details(self, e):
         self.explain.show_event(e, clock_str(self.rec, e.onset))
         self.flow.highlight(e.path)
+        if self.view.selected is not e:
+            self.view.selected = e
+            self.redraw()
+
+    def _on_trace_event(self, e):
+        """An event region was clicked on the traces."""
+        self._show_event_details(e)
+        found = False
+        for r in range(self.ev_table.rowCount()):
+            it = self.ev_table.item(r, 0)
+            if it and it.data(QtCore.Qt.UserRole) is e:
+                self.ev_table.selectRow(r)
+                self.ev_table.scrollToItem(it)
+                found = True
+                break
+        if not found and not e.accepted and not self.chk_rejected.isChecked():
+            self.chk_rejected.setChecked(True)
+        self.tabs.setCurrentIndex(0)
+
+    def _on_cursor(self, t: float):
+        if self.rec is None:
+            return
+        base = self._pos_text()
+        if t >= 0:
+            k = int(t // EPOCH_S)
+            st = self.result.stages if self.result is not None else self.rec.expert_stages
+            stage = f"  ·  {STAGE_TEXT.get(int(st[k]), '?')}" if st is not None and 0 <= k < len(st) else ""
+            self.pos_label.setText(f"{base}   |   cursor {clock_str(self.rec, t)}{stage}")
+        else:
+            self.pos_label.setText(base)
+
+    def _pos_text(self) -> str:
+        t1 = self.t0 + self.page
+        ep = int(self.t0 // EPOCH_S) + 1
+        stage = ""
+        st = self.result.stages if self.result is not None else self.rec.expert_stages
+        if st is not None and ep - 1 < len(st):
+            stage = f"  ·  stage {STAGE_NAMES[int(st[ep - 1])]}"
+            if self.result is not None and self.rec.expert_stages is not None and ep - 1 < len(self.rec.expert_stages):
+                stage += f" (technician {STAGE_NAMES[int(self.rec.expert_stages[ep - 1])]})"
+        return (f"{clock_str(self.rec, self.t0)} – {clock_str(self.rec, t1)}   |   epoch {ep} / {self.rec.n_epochs}{stage}"
+                f"   |   ←/→ page · N/P next/prev event · +/− amplitude · click an event to explain it")
 
     def _event_clicked(self, row, _col):
         it = self.ev_table.item(row, 0)
@@ -1270,10 +1502,12 @@ Automated decision support — to be reviewed by a sleep physician.</p>"""
 
 
 def main():
-    pg.setConfigOptions(antialias=False, useOpenGL=False)
+    pg.setConfigOptions(antialias=True, useOpenGL=False, background="w", foreground="#3c4650")
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    apply_theme(app)
     w = MainWindow()
     w.show()
     if len(sys.argv) > 1:
