@@ -874,6 +874,8 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(ov_card)
         self.pos_label = QtWidgets.QLabel("")
         self.pos_label.setStyleSheet(f"color:{MUTED};padding:0 4px")
+        self.pos_label.setToolTip("← / → page · N / P next / previous event · + / − amplitude · "
+                                  "click an event on the traces to explain it · Ctrl+O upload · F5 re-analyse")
         v.addWidget(self.pos_label)
         sig_card = QtWidgets.QFrame()
         sig_card.setStyleSheet("QFrame{background:white;border:1px solid #dde3ea;border-radius:10px}")
@@ -895,7 +897,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.setDocumentMode(True)
         dock.setWidget(self.tabs)
-        dock.setMinimumWidth(470)
+        dock.setMinimumWidth(400)
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
         self.dock = dock
 
@@ -928,9 +930,20 @@ class MainWindow(QtWidgets.QMainWindow):
         algo_dock = QtWidgets.QDockWidget("Data & algorithm", self)
         algo_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
         algo_dock.setWidget(left_tabs)
-        algo_dock.setMinimumWidth(350)
+        algo_dock.setMinimumWidth(290)
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, algo_dock)
         self.algo_dock = algo_dock
+
+        # Panel toggles at the right end of the toolbar, for small screens.
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        for d, text in ((algo_dock, "Algorithm panel"), (dock, "Results panel")):
+            act = d.toggleViewAction()
+            act.setText(text)
+            act.setToolTip(f"Show or hide the {text.lower()}")
+            tb.addAction(act)
+        self._docks_sized = False
 
         # Events tab: confidence cut-off, filter, table, explanation of the selected event.
         w = QtWidgets.QWidget()
@@ -1008,6 +1021,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         ("+", lambda: self._gain(1.25)), ("=", lambda: self._gain(1.25)), ("-", lambda: self._gain(0.8))):
             sc = QtWidgets.QShortcut(QtGui.QKeySequence(key), self)
             sc.activated.connect(fn)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._docks_sized:
+            self._docks_sized = True
+            # Give the signals the room: side panels get about a quarter of the width each, at most.
+            w = self.width()
+            self.resizeDocks([self.algo_dock, self.dock], [min(330, w // 4), min(470, int(w * 0.3))], QtCore.Qt.Horizontal)
 
     def _update_actions(self):
         has = self.rec is not None
@@ -1420,8 +1441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             stage = f"  ·  stage {STAGE_NAMES[int(st[ep - 1])]}"
             if self.result is not None and self.rec.expert_stages is not None and ep - 1 < len(self.rec.expert_stages):
                 stage += f" (technician {STAGE_NAMES[int(self.rec.expert_stages[ep - 1])]})"
-        return (f"{clock_str(self.rec, self.t0)} – {clock_str(self.rec, t1)}   |   epoch {ep} / {self.rec.n_epochs}{stage}"
-                f"   |   ←/→ page · N/P next/prev event · +/− amplitude · click an event to explain it")
+        return f"{clock_str(self.rec, self.t0)} – {clock_str(self.rec, t1)}   ·   epoch {ep} / {self.rec.n_epochs}{stage}"
 
     def _event_clicked(self, row, _col):
         it = self.ev_table.item(row, 0)

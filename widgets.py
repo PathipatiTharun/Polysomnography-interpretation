@@ -430,6 +430,63 @@ def _fmt(v, f="{:.1f}", none="—"):
     return f.format(v)
 
 
+class FlowLayout(QtWidgets.QLayout):
+    """Lays children out left-to-right and wraps to the next line when the width runs out."""
+
+    def __init__(self, parent=None, hspacing: int = 8, vspacing: int = 8):
+        super().__init__(parent)
+        self._items: list[QtWidgets.QLayoutItem] = []
+        self._hs, self._vs = hspacing, vspacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QtCore.QSize()
+        for it in self._items:
+            size = size.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return size + QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only):
+        x, y, line_h = rect.x(), rect.y(), 0
+        for it in self._items:
+            w, h = it.sizeHint().width(), it.sizeHint().height()
+            if x + w > rect.right() + 1 and line_h > 0:
+                x, y, line_h = rect.x(), y + line_h + self._vs, 0
+            if not test_only:
+                it.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), it.sizeHint()))
+            x += w + self._hs
+            line_h = max(line_h, h)
+        return y + line_h - rect.y()
+
+
 class StatTile(QtWidgets.QFrame):
     def __init__(self, title: str):
         super().__init__()
@@ -441,7 +498,8 @@ class StatTile(QtWidgets.QFrame):
         self.t = QtWidgets.QLabel(title.upper())
         self.t.setStyleSheet(f"color:{MUTED};font-size:10px;letter-spacing:0.5px")
         self.v = QtWidgets.QLabel("—")
-        self.v.setStyleSheet(f"color:{INK};font-size:19px;font-weight:700")
+        self.v.setStyleSheet(f"color:{INK};font-size:18px;font-weight:700")
+        self.setMinimumWidth(118)
         self.s = QtWidgets.QLabel("")
         self.s.setStyleSheet(f"color:{MUTED};font-size:10px")
         v.addWidget(self.t)
@@ -450,7 +508,7 @@ class StatTile(QtWidgets.QFrame):
 
     def set(self, value: str, sub: str = "", color: str | None = None):
         self.v.setText(value)
-        self.v.setStyleSheet(f"color:{color or INK};font-size:19px;font-weight:700")
+        self.v.setStyleSheet(f"color:{color or INK};font-size:18px;font-weight:700")
         self.s.setText(sub)
         self.s.setVisible(bool(sub))
 
@@ -463,36 +521,45 @@ class SummaryBar(QtWidgets.QFrame):
         super().__init__()
         self.setStyleSheet(f"SummaryBar{{background:{CARD};border:1px solid {LINE};border-radius:10px}}"
                            "QLabel{background:transparent;border:none}")
-        h = QtWidgets.QHBoxLayout(self)
-        h.setContentsMargins(14, 10, 14, 10)
-        h.setSpacing(14)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 10)
+        outer.setSpacing(8)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(12)
         self.badge = QtWidgets.QLabel("—")
         self.badge.setAlignment(QtCore.Qt.AlignCenter)
-        self.badge.setFixedSize(92, 60)
-        h.addWidget(self.badge)
+        self.badge.setFixedSize(88, 46)
+        top.addWidget(self.badge, 0, QtCore.Qt.AlignTop)
         text = QtWidgets.QVBoxLayout()
         text.setSpacing(2)
         self.primary = QtWidgets.QLabel("No study loaded")
-        self.primary.setStyleSheet(f"font-size:16px;font-weight:700;color:{INK}")
+        self.primary.setStyleSheet(f"font-size:15px;font-weight:700;color:{INK}")
         self.primary.setWordWrap(True)
         self.secondary = QtWidgets.QLabel("")
         self.secondary.setStyleSheet(f"color:{MUTED};font-size:11px")
         self.secondary.setWordWrap(True)
         self.chips = QtWidgets.QLabel("")
         self.chips.setStyleSheet("font-size:11px")
+        self.chips.setWordWrap(True)
         text.addWidget(self.primary)
         text.addWidget(self.secondary)
         text.addWidget(self.chips)
-        h.addLayout(text, 1)
+        top.addLayout(text, 1)
+        self.btn = QtWidgets.QPushButton("Open report")
+        self.btn.setProperty("primary", True)
+        self.btn.clicked.connect(self.open_report.emit)
+        top.addWidget(self.btn, 0, QtCore.Qt.AlignTop)
+        outer.addLayout(top)
+        # Tiles wrap onto further rows when the window is narrow.
+        holder = QtWidgets.QWidget()
+        holder.setStyleSheet("background:transparent")
+        flow = FlowLayout(holder, 8, 8)
         self.tiles = {k: StatTile(t) for k, t in (
             ("ahi", "AHI"), ("oc", "Obstr. / central AHI"), ("odi", "ODI"), ("nadir", "Nadir SpO2"),
             ("tst", "Sleep time"), ("ar", "Arousals"))}
         for tile in self.tiles.values():
-            h.addWidget(tile)
-        self.btn = QtWidgets.QPushButton("Open report")
-        self.btn.setProperty("primary", True)
-        self.btn.clicked.connect(self.open_report.emit)
-        h.addWidget(self.btn)
+            flow.addWidget(tile)
+        outer.addWidget(holder)
         self.clear()
 
     def clear(self):
