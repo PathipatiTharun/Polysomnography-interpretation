@@ -43,6 +43,8 @@ class StagingParams:
     emg_r_z: float = -0.3          # chin EMG must be below this z-score for REM (atonia)
     rem_density_r: float = 2.0     # eye-movement bursts per epoch that support REM
     self_transition: float = 0.85  # HMM stickiness
+    emg_strong_atonia_z: float = 1.5   # chin EMG z-score below minus this counts as clear atonia
+    n2_atonia_penalty: float = 0.8     # how much clear atonia argues against N2 (0 = ignore tone for N2)
     max_night_h: float = 12.0      # recordings longer than this get lights-off/on detection
 
 
@@ -64,6 +66,7 @@ class EpochFeatures:
     eog_corr: np.ndarray       # left/right EOG correlation (conjugate eye movements)
     artifact: np.ndarray       # bool
     rest: tuple[int, int] | None = None  # main rest period (first, last+1) epoch, set by stage_sleep
+    beta_abs: np.ndarray | None = None   # log absolute 16-30 Hz EEG power (forehead muscle / wake activity)
 
     def as_dict(self) -> dict[str, np.ndarray]:
         return {k: getattr(self, k) for k in ("delta", "theta", "alpha", "sigma", "beta", "sw_fraction",
@@ -180,7 +183,8 @@ def compute_features(rec: Recording, params: StagingParams | None = None) -> Epo
     eog_z = _zscore(eog_activity)
 
     return EpochFeatures(n_ep, delta, theta, alpha, sigma, beta, sw_fraction, spindles, emg, emg_z,
-                         rem_density, eog_activity, eog_z, eog_corr, artifact)
+                         rem_density, eog_activity, eog_z, eog_corr, artifact,
+                         beta_abs=np.log(_band(f, pxx, 16.0, 30.0) + 1e-12))
 
 
 def _sig(x: np.ndarray, thr: float, width: float) -> np.ndarray:
@@ -206,7 +210,10 @@ def memberships(F: EpochFeatures, p: StagingParams) -> np.ndarray:
     mixed = _sig(-F.delta, -p.delta_light, 0.04)
     rem = atonia * mixed * (1 - n3) * (0.5 + 0.5 * _sig(F.rem_density, p.rem_density_r, 1.0))
     # N2: moderately delta-rich NREM without the N3 slow-wave load.
-    n2 = _sig(F.delta, p.delta_n2, 0.04) * (1 - n3) * (1 - wake) * (1 - 0.7 * rem)
+    # Clear chin atonia is the hallmark of REM, so it argues against N2 (tone in N2 is reduced, not absent).
+    strong_atonia = _sig(-F.emg_z, p.emg_strong_atonia_z, 0.3)
+    n2 = (_sig(F.delta, p.delta_n2, 0.04) * (1 - n3) * (1 - wake) * (1 - 0.7 * rem)
+          * (1 - p.n2_atonia_penalty * strong_atonia))
     # N1: mixed-frequency EEG with chin tone still present.
     n1 = (1 - wake) * (1 - n3) * mixed * (1 - rem) * _sig(F.emg_z, -0.5, 0.3)
     M = np.stack([wake, n1, n2, n3, rem], axis=1)
@@ -268,9 +275,16 @@ def rest_period(F: EpochFeatures, smooth_epochs: int = 20, min_active_epochs: in
     """
     from scipy import ndimage
     n = F.n
-    act = (F.emg - np.median(F.emg)) / (pp.robust_scale(F.emg) or 1.0)
+    # Each channel is z-scored and capped at +-4 so that one channel with a tiny spread (e.g. a
+    # rectified EMG envelope that is flat through 16 h of daytime wake) cannot swamp the others.
+    def zc(v):
+        return np.clip((v - np.median(v)) / (pp.robust_scale(v) or 1.0), -4.0, 4.0)
+    act = zc(F.emg)
     if np.any(F.eog_activity):
-        act = act + (F.eog_activity - np.median(F.eog_activity)) / (pp.robust_scale(F.eog_activity) or 1.0)
+        act = act + zc(F.eog_activity)
+    if F.beta_abs is not None:
+        # Absolute fast EEG power (scalp/forehead muscle, active wake) drops sharply at sleep onset.
+        act = act + zc(F.beta_abs)
     act = pp.moving_mean(act, smooth_epochs)
     active = act >= _otsu(act)
     active = ndimage.binary_closing(np.pad(active, bridge_epochs, constant_values=True),

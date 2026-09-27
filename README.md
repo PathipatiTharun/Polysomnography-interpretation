@@ -59,6 +59,31 @@ A static web page where the doctor drops the EDF file and the same `psg` analysi
 
 Status: the page and the analysis engine load, but a full end-to-end run in the browser has not been verified yet.
 
+### Automatic sleep annotations and visualisation (`annotate.py`)
+
+For recordings where breathing can't be scored (e.g. Sleep-EDF, whose airflow and chin channels are stored at 1 Hz), or when you want the sleep micro-structure as well:
+
+```bash
+.venv\Scripts\python annotate.py data\sleepedf\SC4001E0-PSG.edf
+```
+
+This writes `reports/annotations/<recording>/`:
+- **`<name>_auto-annotations.edf`**: an EDF+ annotation file in the same format as the technician's `*-Hypnogram.edf`. Open it next to the recording in EDFbrowser, MNE or Polyman.
+- **`<name>_annotations.csv`**: the same annotations as a table (onset, clock time, duration, label, channel, details).
+- **`<name>_annotations.html`**, with three figures:
+  - whole-night overview: technician vs automatic hypnogram, EEG spectrogram, event rasters, chin tone, temperature, breathing
+  - one example 30-s epoch per stage with the detected events shaded
+  - agreement with the technician
+
+Annotations produced:
+- Sleep stage per 30-s epoch (AASM names).
+- Estimated lights off / on for long recordings.
+- **Sleep spindles:** 11–16 Hz bursts, 0.5–3 s, in N2/N3.
+- **Slow waves:** 0.3–2 Hz, negative peak ≤ −40 µV, peak-to-peak ≥ 75 µV, in N2/N3.
+- **Rapid eye movements:** steep EOG deflections ≥ 40 µV in REM.
+- **EEG arousals.**
+- Artifact epochs.
+
 ### Batch mode (no GUI)
 
 Uses the same processing and adds the studies to the same list:
