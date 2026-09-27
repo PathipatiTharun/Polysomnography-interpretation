@@ -33,7 +33,19 @@ Double-click **`run.bat`** (first run creates the environment and installs packa
 3. **Results.** The app opens on the diagnosis and the first scored event. The report is **saved automatically** to `reports/<recording>/` as HTML, CSV and JSON.
 4. **Home screen.** Lists all previous studies with diagnosis, AHI and severity. From there you can open the report or review the signals again.
 
-The hypopnea rule (AASM recommended 3 %/arousal, or acceptable 4 % for CMS) and the staging source are set in the toolbar before uploading.
+The staging source is set in the toolbar before uploading; the scoring rule can be changed at any time (see below).
+
+### Choosing the scoring rule, confidence and explanations
+
+The window has three parts, left to right: **Algorithm** (which rule and thresholds), the **signals**, and the **results**.
+
+- **Rule versions.** The *Algorithm* panel lists seven published adult scoring definitions, from the 1999 "Chicago criteria" through the AASM 2007 recommended/alternative rules, the 2012 v2.0 rule 1A, the 2013 rule 1B (CMS/Medicare), the Sleep Heart Health Study definition and the current manual. Each shows its summary, source and thresholds ([docs/rule_versions.md](docs/rule_versions.md)). Choosing one re-scores the loaded night in about a second; a full re-analysis is only needed when the staging source changes.
+- **Sliders.** The hard-coded numbers (apnea drop, hypopnea drop, minimum duration, desaturation, arousal, hypopnea classification) are sliders and checkboxes. Moving one re-scores live and marks the parameters as *custom*; *Reset to rule values* restores the published numbers.
+- **Confidence per event.** Every event carries a confidence: the smallest margin by which it clears the rule's thresholds (exactly at a threshold = 50 %, comfortably past it > 95 %). The *Confidence ≥* slider on the Events tab hides events below the cut-off and recomputes the AHI from the rest, so you can see how many events are clear-cut (e.g. "≥ 90 %: 84 events, ≥ 75 %: 124, all: 162").
+- **Why was this scored?** Selecting an event shows each criterion it was tested against, the measured value, the rule's threshold and the margin. Ticking *Rejected candidates* also lists the breathing reductions that did **not** meet the rule, greyed, with the reason ("SpO2 fell 2.0 % (rule needs ≥ 3 %)", "occurs entirely during wake").
+- **Flowchart.** The *Flowchart* tab draws the decision steps for the current parameters (sleep → signal quality → ≥ 90 % drop? → ≥ 30 % drop? → desaturation/arousal? → effort on the belts → obstructive / central / mixed) and highlights the path the selected event took.
+
+The same options exist on the command line: `--rule aasm2007_alt`, `--min-confidence 75`.
 
 ### Browser version (experimental, `web/`)
 
@@ -73,7 +85,8 @@ Download more nights into `data/ucddb/`. The app detects the `*_respevt.txt` / `
 | Clean | `psg/preprocess.py` | Zero-phase Butterworth band/low/high-pass filters and 50 Hz notch. Flat-line and clipping masks. SpO2 cleaning: rejects values <50 % or >100 %, rejects jumps faster than 4 %/s, interpolates gaps ≤10 s and leaves longer gaps as NaN so no event is scored on missing data. |
 | Stage | `psg/staging.py` | 30-s epochs. Features: relative band powers, slow-wave coverage (AASM 20 % rule), spindles, chin EMG tone, rapid eye movements. Soft rule memberships feed an HMM/Viterbi smoother. Recordings longer than 12 h get automatic lights-off/on detection. |
 | Arousals | `psg/arousal.py` | Abrupt EEG frequency shift ≥3 s after ≥10 s of sleep, with EMG confirmation in REM. |
-| Respiratory | `psg/respiratory.py` | See the rules below. |
+| Respiratory | `psg/respiratory.py` | See the rules below. Parameterised so any published rule version can be run; records per-event criteria, confidence and rejection reasons; `rescore()` re-applies new thresholds to cached signals in ~1 s. |
+| Rule library | `psg/rules.py` | Seven published apnea/hypopnea definitions with citations, mapped to scorer parameters, plus the decision flowchart. |
 | Oximetry | `psg/spo2.py` | ≥3 % desaturations, ODI, T90, nadir. |
 | Interpret | `psg/pipeline.py` | AHI, OAHI/CAHI, REM/NREM AHI, supine/non-supine AHI, severity and diagnosis text, clinical flags (central-predominant, REM-related, positional, hypoxaemia, low sleep efficiency). |
 | Report | `psg/report.py` | HTML report (hypnogram, event timeline, SpO2), event CSV, JSON. |
@@ -125,7 +138,7 @@ The severity was wrong on both unseen nights, and event-level agreement is much 
 
 - **The reference scoring does not follow the current AASM hypopnea rule.** The database documentation says stages were scored with the older Rechtschaffen & Kales rules and does not state the respiratory criteria. On night 022, only 55 % of the technician's hypopneas have a ≥3 % desaturation and only 4 are marked with an arousal.
 - **Borderline events.** Many disagreements sit right at the thresholds (flow drop around 30 %, desaturation around 3 %), where small measurement differences flip the decision.
-- **The rule choice matters.** With the 4 % rule the automatic AHI becomes 23.5 and 3.1: the first moves further from the technician, the second changes from over-called to under-called.
+- **The rule choice matters.** Under the seven rule versions the automatic AHI for night B ranges from 3.6 (4 % rules, "normal") to 16.4 (3 %-or-arousal, "moderate") to 34.8 (Chicago 1999, "severe") against the technician's 7.0; the full table per rule and per confidence cut-off is in [docs/rule_versions.md](docs/rule_versions.md).
 
 ### Known limitations
 

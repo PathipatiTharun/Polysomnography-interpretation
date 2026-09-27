@@ -122,13 +122,23 @@ def write_html(res: AnalysisResult, path: str | Path, validation: dict | None = 
     ox = ix.get("spo2") or {}
     sev_color = {"Normal": "#2e7d32", "Mild": "#f9a825", "Moderate": "#ef6c00", "Severe": "#c62828"}.get(dg["severity"], "#555")
     p = res.options.scoring
-    rule = (f"Hypopnea: ≥{p.hypopnea_drop * 100:.0f}% flow drop ≥{p.min_duration:.0f}s with ≥{p.hypopnea_desat:.0f}% desaturation"
-            + (" or arousal (AASM recommended rule)" if p.hypopnea_arousal else " (AASM acceptable / CMS rule)"))
+    from .rules import RULES
+    rv = RULES.get(p.rule_id)
+    rule = (f"{rv.name}: {rv.short()}" if rv else
+            f"Apnea ≥{p.apnea_drop * 100:.0f}% drop ≥{p.min_duration:.0f} s · Hypopnea ≥{p.hypopnea_drop * 100:.0f}% "
+            f"drop ≥{p.min_duration:.0f} s + ≥{p.hypopnea_desat:g}% desaturation" + (" or arousal" if p.hypopnea_arousal else ""))
+    cc = ix.get("confidence_counts", {})
+    conf_txt = " / ".join(f"≥{int(k * 100)}%: {v}" for k, v in cc.items()) if cc else "—"
+    min_conf = ix.get("min_confidence", 0.0)
 
     def row(k, v):
         return f"<tr><th>{html.escape(k)}</th><td>{v}</td></tr>"
 
     resp_rows = "".join([
+        row("Scoring rule", html.escape(rule)),
+        row("Events by confidence", f"{conf_txt} (of {ix.get('n_scored_all', ix['n_events'])} scored; "
+                                    f"{ix.get('n_rejected', 0)} candidates rejected)"
+                                    + (f"; indices use ≥{min_conf * 100:.0f}%" if min_conf else "")),
         row("AHI (apnea-hypopnea index)", f"<b>{_num(ix['ahi'])}</b> /h"),
         row("Obstructive AHI / Central AHI", f"{_num(ix['oahi'])} / {_num(ix['cahi'])} /h"),
         row("Apnea index / Hypopnea index", f"{_num(ix['ai'])} / {_num(ix['hi'])} /h"),
@@ -160,8 +170,14 @@ def write_html(res: AnalysisResult, path: str | Path, validation: dict | None = 
         row("N1 / N2 / N3 / REM", f"{ix['pct_n1']:.0f} / {ix['pct_n2']:.0f} / {ix['pct_n3']:.0f} / {ix['pct_rem']:.0f} % of TST"),
     ])
     q_rows = "".join(row(k, f"{v * 100:.0f} %") for k, v in ix.get("signal_quality", {}).items())
+    def conf_cell(e):
+        c = e.confidence * 100
+        col = "#2e7d32" if c >= 90 else ("#f9a825" if c >= 75 else "#c62828")
+        lim = e.limiting
+        tip = html.escape(f"limited by {lim.label.lower()}: {lim.text()}" if lim else "")
+        return f"<td style='color:{col}' title='{tip}'>{c:.0f}</td>"
     ev_rows = "".join(
-        f"<tr><td>{_clock(res, e.onset)}</td><td>{e.duration:.0f}</td><td>{html.escape(e.label)}</td>"
+        f"<tr><td>{_clock(res, e.onset)}</td><td>{e.duration:.0f}</td><td>{html.escape(e.label)}</td>{conf_cell(e)}"
         f"<td>{e.flow_drop * 100:.0f}</td><td>{_num(e.desat)}</td><td>{_num(e.desat_nadir, '{:.0f}')}</td>"
         f"<td>{e.stage or ''}</td><td>{'✓' if e.arousal else ''}</td><td>{html.escape(e.notes)}</td></tr>"
         for e in res.events)
@@ -199,10 +215,10 @@ staging: {html.escape(res.stage_source)} · generated automatically in {res.runt
 {('<h2>Warnings</h2><ul>' + warns + '</ul>') if warns else ''}
 {val_html}
 <h2>Event list ({len(res.events)})</h2>
-<table class="ev"><tr><th>Time</th><th>Dur s</th><th>Type</th><th>Flow ↓%</th><th>Desat %</th><th>Nadir</th><th>Stage</th><th>Arousal</th><th>Notes</th></tr>{ev_rows}</table>
-<p class="note">Scoring rules: AASM Manual for the Scoring of Sleep and Associated Events (adult).
-Apnea: ≥{p.apnea_drop * 100:.0f}% drop in peak flow excursion for ≥{p.min_duration:.0f}s; obstructive / central / mixed by
-thoraco-abdominal effort. {rule}. Hypopnea obstructive if snoring, flow flattening, paradox or preserved effort.
+<table class="ev"><tr><th>Time</th><th>Dur s</th><th>Type</th><th>Conf %</th><th>Flow ↓%</th><th>Desat %</th><th>Nadir</th><th>Stage</th><th>Arousal</th><th>Notes</th></tr>{ev_rows}</table>
+<p class="note">Scoring rule: {html.escape(rule)}. Obstructive / central / mixed apneas by thoraco-abdominal effort;
+hypopnea obstructive if snoring, flow flattening, paradox or preserved effort.
+Confidence = smallest margin by which the event clears the rule's thresholds (50 % = exactly at a threshold).
 Severity: AHI &lt;5 normal, 5–15 mild, 15–30 moderate, ≥30 severe.
 This is automated decision support and must be reviewed by a qualified sleep physician.</p>
 </body></html>"""

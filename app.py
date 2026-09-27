@@ -25,10 +25,11 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from psg import preprocess as pp
 from psg.io import EPOCH_S, STAGE_NAMES, Recording, load_recording
-from psg.pipeline import AnalysisOptions, AnalysisResult, analyze
+from psg.pipeline import AnalysisOptions, AnalysisResult, analyze, rescore_analysis
 from psg.report import write_events_csv, write_html, write_json
 from psg.respiratory import ScoringParams
 from psg.study import ACCEPTED_SUFFIXES, StudyError, list_studies, process_study
+from widgets import AlgorithmPanel, ExplanationPane, FlowchartView
 
 APP_NAME = "PSG Interpreter"
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
@@ -280,7 +281,7 @@ class SignalView(QtWidgets.QScrollArea):
         self.glw.setMinimumHeight(self.row_height * max(len(labels), 1) + 30)
 
     def draw(self, rec: Recording, display: dict, t0: float, t1: float, result: AnalysisResult | None,
-             show_expert: bool, show_derived: bool):
+             show_expert: bool, show_derived: bool, show_rejected: bool = False):
         for p, it in self.overlays:
             p.removeItem(it)
         self.overlays.clear()
@@ -319,10 +320,27 @@ class SignalView(QtWidgets.QScrollArea):
                     self._add(self.plots[l], r)
                 if resp_labels:
                     p = self.plots[resp_labels[0]]
-                    txt = pg.TextItem(f"{e.code}  {e.duration:.0f}s" + (f"  -{e.desat:.0f}%" if e.desat else ""),
-                                      color=col, anchor=(0, 0))
-                    txt.setPos(e.onset, p.vb.viewRange()[1][1])
+                    txt = pg.TextItem(f"{e.code}  {e.duration:.0f}s" + (f"  -{e.desat:.0f}%" if e.desat else "")
+                                      + f"  ·{e.confidence * 100:.0f}%", color=col, anchor=(0, 0))
+                    txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][1])
                     self._add(p, txt)
+            if show_rejected:
+                # Candidates that failed the rule (or fell under the confidence cut-off): grey, with the reason.
+                shown = set(map(id, result.events))
+                for e in result.resp.candidates:
+                    if id(e) in shown or e.end < t0 or e.onset > t1:
+                        continue
+                    for l in resp_labels:
+                        r = pg.LinearRegionItem((e.onset, e.end), movable=False, brush=(120, 120, 120, 35),
+                                                pen=pg.mkPen((120, 120, 120, 140), style=QtCore.Qt.DashLine))
+                        r.setZValue(-10)
+                        self._add(self.plots[l], r)
+                    if resp_labels:
+                        p = self.plots[resp_labels[0]]
+                        why = e.reject_reason if not e.accepted else f"below confidence cut-off ({e.confidence * 100:.0f}%)"
+                        txt = pg.TextItem(f"not scored: {why}", color=(110, 110, 110), anchor=(0, 0))
+                        txt.setPos(max(e.onset, t0), p.vb.viewRange()[1][1])
+                        self._add(p, txt)
             for (a, d) in result.arousals:
                 if a + d < t0 or a > t1:
                     continue
@@ -431,7 +449,7 @@ class HomePage(QtWidgets.QWidget):
     open_report = QtCore.pyqtSignal(str)
     reopen = QtCore.pyqtSignal(str)
 
-    COLS = ["Recording", "Recorded", "Processed", "Diagnosis", "AHI /h", "Severity"]
+    COLS = ["Recording", "Recorded", "Processed", "Diagnosis", "AHI /h", "Severity", "Scoring rule"]
 
     def __init__(self):
         super().__init__()
@@ -491,7 +509,8 @@ class HomePage(QtWidgets.QWidget):
         self.table.setRowCount(len(self.entries))
         for r, e in enumerate(self.entries):
             vals = [e["name"], e.get("recorded", "")[:16], e.get("processed", "").replace("T", " ")[:16],
-                    e.get("diagnosis", ""), "" if e.get("ahi") is None else f"{e['ahi']:.1f}", e.get("severity", "")]
+                    e.get("diagnosis", ""), "" if e.get("ahi") is None else f"{e['ahi']:.1f}", e.get("severity", ""),
+                    e.get("rule", e.get("hypopnea_rule", ""))]
             for c, v in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(v)
                 if c == 5 and v in SEVERITY_COLORS:
@@ -633,19 +652,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_report = tb.addAction(st.standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView), "Open report",
                                        self.open_saved_report)
         self.act_analyze = tb.addAction(st.standardIcon(QtWidgets.QStyle.SP_BrowserReload), "Re-analyze", self.run_analysis)
-        self.act_analyze.setToolTip("Run the analysis again, e.g. after changing the hypopnea rule")
+        self.act_analyze.setToolTip("Run the full analysis again (needed after changing the staging source; "
+                                    "rule and threshold changes re-score instantly)")
         self.act_analyze.setShortcut("F5")
         self.act_export = tb.addAction(st.standardIcon(QtWidgets.QStyle.SP_DialogSaveButton), "Save copy…", self.export)
         tb.addSeparator()
-        tb.addWidget(QtWidgets.QLabel(" Hypopnea rule: "))
-        self.rule = QtWidgets.QComboBox()
-        self.rule.addItems(["AASM recommended: ≥30% + ≥3% desat or arousal", "AASM acceptable (CMS): ≥30% + ≥4% desat"])
-        tb.addWidget(self.rule)
         tb.addWidget(QtWidgets.QLabel("  Staging: "))
         self.staging = QtWidgets.QComboBox()
         self.staging.addItems(["Automatic", "Expert file (if present)"])
+        self.staging.setToolTip("Source of the hypnogram. Changing it needs a full re-analysis (F5).")
         tb.addWidget(self.staging)
-        self.rule.currentIndexChanged.connect(self._update_rule_note)
         self.staging.currentIndexChanged.connect(self._update_rule_note)
         tb.addSeparator()
         self.page_label = QtWidgets.QLabel(" Page: ")
@@ -700,6 +716,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
         self.dock = dock
 
+        # Left: algorithm (published rule version + threshold sliders).
+        self.algo = AlgorithmPanel()
+        self.algo.params_changed.connect(self._params_changed)
+        algo_dock = QtWidgets.QDockWidget("Algorithm", self)
+        algo_dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
+        algo_dock.setWidget(self.algo)
+        algo_dock.setMinimumWidth(340)
+        self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, algo_dock)
+        self.algo_dock = algo_dock
+
         # Channels tab.
         w = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(w)
@@ -716,18 +742,36 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addLayout(row)
         self.tabs.addTab(w, "Channels")
 
-        # Events tab.
+        # Events tab: confidence cut-off, filter, table, explanation of the selected event.
         w = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(w)
+        conf_row = QtWidgets.QHBoxLayout()
+        conf_row.addWidget(QtWidgets.QLabel("Confidence ≥"))
+        self.conf_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.conf_slider.setRange(0, 99)
+        self.conf_slider.setValue(0)
+        self.conf_slider.setToolTip("Only events at or above this confidence are counted in the AHI and shown")
+        self.conf_slider.valueChanged.connect(self._conf_changed)
+        conf_row.addWidget(self.conf_slider, 1)
+        self.conf_label = QtWidgets.QLabel("0 %")
+        self.conf_label.setMinimumWidth(150)
+        conf_row.addWidget(self.conf_label)
+        lv.addLayout(conf_row)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Show:"))
         self.ev_filter = QtWidgets.QComboBox()
         self.ev_filter.addItems(["All events", "Apneas", "Hypopneas"] + list(EVENT_NAMES.values()))
         self.ev_filter.currentIndexChanged.connect(self._fill_events)
         row.addWidget(self.ev_filter, 1)
+        self.chk_rejected = QtWidgets.QCheckBox("Rejected candidates")
+        self.chk_rejected.setToolTip("Also list breathing reductions that did NOT meet the rule, with the reason")
+        self.chk_rejected.toggled.connect(self._fill_events)
+        self.chk_rejected.toggled.connect(self.redraw)
+        row.addWidget(self.chk_rejected)
         lv.addLayout(row)
-        self.ev_table = QtWidgets.QTableWidget(0, 8)
-        self.ev_table.setHorizontalHeaderLabels(["Time", "Dur s", "Type", "Flow ↓%", "Desat %", "Nadir", "Stage", "Notes"])
+        split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.ev_table = QtWidgets.QTableWidget(0, 9)
+        self.ev_table.setHorizontalHeaderLabels(["Time", "Dur s", "Type", "Conf %", "Flow ↓%", "Desat %", "Nadir", "Stage", "Notes"])
         self.ev_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.ev_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.ev_table.verticalHeader().setVisible(False)
@@ -736,7 +780,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ev_table.setSortingEnabled(False)
         self.ev_table.cellDoubleClicked.connect(self._event_clicked)
         self.ev_table.cellClicked.connect(self._event_clicked)
-        lv.addWidget(self.ev_table, 1)
+        split.addWidget(self.ev_table)
+        self.explain = ExplanationPane()
+        split.addWidget(self.explain)
+        split.setSizes([420, 260])
+        lv.addWidget(split, 1)
         legend = QtWidgets.QLabel(" ".join(
             f"<span style='background:rgb{c};color:white;padding:1px 4px'>{k}</span> {EVENT_NAMES[k]}&nbsp;&nbsp;"
             for k, c in EVENT_COLORS.items()))
@@ -749,6 +797,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.report.setOpenExternalLinks(True)
         self.report.setHtml("<p style='color:#666'>Run <b>Analyze</b> to see the interpretation.</p>")
         self.tabs.addTab(self.report, "Report")
+
+        # Flowchart tab: the decision steps under the current parameters; the selected event's path is highlighted.
+        self.flow = FlowchartView()
+        self.flow.set_params(self.algo.params())
+        self.tabs.addTab(self.flow, "Flowchart")
 
         # Status bar.
         self.progress = QtWidgets.QProgressBar()
@@ -782,18 +835,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_rule_note()
         self.stack.setCurrentWidget(self.home)
         self.dock.hide()
+        self.algo_dock.show()
         self._update_actions()
 
     def show_viewer(self):
         self.stack.setCurrentWidget(self.viewer)
         self.dock.show()
+        self.algo_dock.show()
         self._update_actions()
 
     def _update_rule_note(self):
-        rule = ("AASM recommended rule (hypopnea: ≥30 % flow drop with ≥3 % desaturation or arousal)"
-                if self.rule.currentIndex() == 0 else "AASM acceptable / CMS rule (hypopnea: ≥30 % flow drop with ≥4 % desaturation)")
+        r = self.algo.rule()
         staging = "automatic sleep staging" if self.staging.currentIndex() == 0 else "technician hypnogram when available"
-        self.home.rule_note.setText(f"Scoring settings: {rule}; {staging}. Change them in the toolbar before uploading.")
+        self.home.rule_note.setText(f"Scoring rule: {r.name} — {r.short()}; {staging}. "
+                                    f"Choose the rule in the Algorithm panel; thresholds can be changed after the analysis too.")
+
+    # --------------------------------------------------------------------- live re-scoring
+    def _params_changed(self, params):
+        """Rule version or a slider changed: re-score the loaded night with the new thresholds."""
+        self.flow.set_params(params)
+        self._update_rule_note()
+        if self.result is None or self._thread is not None:
+            return
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            self.result = rescore_analysis(self.result, params, self.conf_slider.value() / 100.0)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self._refresh_results(f"Re-scored with {self.result.rule_name} in {self.result.runtime_s:.1f} s")
+
+    def _conf_changed(self, value):
+        self.conf_label.setText(f"{value} %")
+        if self.result is None or self._thread is not None:
+            return
+        self.result = rescore_analysis(self.result, None, value / 100.0)
+        self._refresh_results(f"Confidence cut-off {value} %")
+
+    def _refresh_results(self, status: str = ""):
+        res = self.result
+        self.overview.show_events(res.events, self.rec.expert_events)
+        self._fill_events()
+        self.report.setHtml(self._report_html(res))
+        cc = res.summary.get("confidence_counts", {})
+        self.conf_label.setText(f"{self.conf_slider.value()} %  ·  {len(res.events)} of {res.summary.get('n_scored_all', 0)} events")
+        self.algo.set_status(f"{res.diagnosis['primary']}\nEvents at ≥90 % / ≥75 % / ≥50 % confidence: "
+                             f"{cc.get(0.9, 0)} / {cc.get(0.75, 0)} / {cc.get(0.5, 0)}; "
+                             f"{res.summary.get('n_rejected', 0)} candidates rejected.")
+        self.redraw()
+        if status:
+            self.statusBar().showMessage(f"{res.diagnosis['primary']}   —   {status}")
 
     # --------------------------------------------------------------------- upload queue
     def dragEnterEvent(self, ev):
@@ -845,7 +935,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.page_box.setCurrentIndex(2)
             first = study.result.events[0]
             self.center_on(first.onset + first.duration / 2)
-            self._select_row_for(0)
+            self._select_row_for(first)
         self.statusBar().showMessage(f"{study.result.diagnosis['primary']}   —   report saved to {study.report_path}")
         if self._queue:
             QtCore.QTimer.singleShot(0, self._next_in_queue)
@@ -1010,7 +1100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if idx.size:
             k = idx[0] if direction > 0 else idx[-1]
             self.center_on(float(ons[k]))
-            self._select_row_for(k)
+            self._select_row_for(self.result.events[k])
 
     def _gain(self, f):
         self.view.gain *= f
@@ -1021,7 +1111,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         t1 = self.t0 + self.page
         self.view.draw(self.rec, self.display, self.t0, t1, self.result,
-                       self.chk_expert.isChecked(), self.chk_derived.isChecked())
+                       self.chk_expert.isChecked(), self.chk_derived.isChecked(), self.chk_rejected.isChecked())
         self.overview.set_window(self.t0, t1)
         ep = int(self.t0 // EPOCH_S) + 1
         stage = ""
@@ -1035,8 +1125,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --------------------------------------------------------------------- analysis
     def _options(self):
-        scoring = ScoringParams() if self.rule.currentIndex() == 0 else ScoringParams(hypopnea_desat=4.0, hypopnea_arousal=False)
-        return AnalysisOptions(staging_source="auto" if self.staging.currentIndex() == 0 else "expert", scoring=scoring)
+        return AnalysisOptions(staging_source="auto" if self.staging.currentIndex() == 0 else "expert",
+                               scoring=self.algo.params(), min_confidence=self.conf_slider.value() / 100.0)
 
     def run_analysis(self):
         if self.rec:
@@ -1045,56 +1135,79 @@ class MainWindow(QtWidgets.QMainWindow):
     def _analyzed(self, res: AnalysisResult):
         self.result = res
         self.overview.show_recording(self.rec, res.stages, res.resp.spo2_clean, res.resp.spo2_fs)
-        self.overview.show_events(res.events, self.rec.expert_events)
-        self._fill_events()
-        self.report.setHtml(self._report_html(res))
+        self.flow.set_params(res.options.scoring)
+        self.flow.highlight(None)
+        self.explain.clear_event()
+        self._refresh_results()
         self.tabs.setCurrentIndex(2)
         self.statusBar().showMessage(f"{res.diagnosis['primary']}  —  {len(res.events)} events, analysis {res.runtime_s:.0f} s")
-        self.redraw()
 
     def _filtered_events(self):
+        """(event, accepted) rows: scored events above the confidence cut-off, plus rejected
+        candidates when requested, in time order."""
         if not self.result:
             return []
         f = self.ev_filter.currentText()
+        shown = set(map(id, self.result.events))
         out = []
-        for i, e in enumerate(self.result.events):
+        for e in self.result.resp.candidates:
+            ok = id(e) in shown
+            if not ok and not (self.chk_rejected.isChecked() and not e.accepted):
+                continue
             if f == "All events" or (f == "Apneas" and e.kind == "apnea") or (f == "Hypopneas" and e.kind == "hypopnea") \
                     or EVENT_NAMES.get(e.code) == f:
-                out.append((i, e))
+                out.append((e, ok))
         return out
 
     def _fill_events(self):
         rows = self._filtered_events()
         self.ev_table.setRowCount(len(rows))
-        for r, (i, e) in enumerate(rows):
-            vals = [clock_str(self.rec, e.onset), f"{e.duration:.0f}", EVENT_NAMES[e.code], f"{e.flow_drop * 100:.0f}",
+        grey = QtGui.QColor("#9aa3ad")
+        for r, (e, ok) in enumerate(rows):
+            vals = [clock_str(self.rec, e.onset), f"{e.duration:.0f}", EVENT_NAMES[e.code] if ok else "not scored",
+                    f"{e.confidence * 100:.0f}" if ok else "", f"{e.flow_drop * 100:.0f}",
                     "" if e.desat is None else f"{e.desat:.1f}", "" if e.desat_nadir is None else f"{e.desat_nadir:.0f}",
-                    e.stage or "", e.notes + (" arousal" if e.arousal else "")]
+                    e.stage or "", (e.notes + (" arousal" if e.arousal else "")) if ok else e.reject_reason]
             for c, v in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(v)
                 if c == 0:
-                    it.setData(QtCore.Qt.UserRole, i)
-                if c == 2:
+                    it.setData(QtCore.Qt.UserRole, e)
+                if not ok:
+                    it.setForeground(grey)
+                elif c == 2:
                     it.setForeground(QtGui.QColor(*EVENT_COLORS[e.code]))
+                elif c == 3:
+                    conf = e.confidence * 100
+                    it.setForeground(QtGui.QColor("#2e7d32" if conf >= 90 else "#f9a825" if conf >= 75 else "#c62828"))
+                    lim = e.limiting
+                    if lim is not None:
+                        it.setToolTip(f"Limited by {lim.label.lower()}: {lim.text()}")
                 self.ev_table.setItem(r, c, it)
         self.ev_table.resizeColumnsToContents()
-        self.tabs.setTabText(1, f"Events ({len(self.result.events) if self.result else 0})")
+        n = len(self.result.events) if self.result else 0
+        self.tabs.setTabText(1, f"Events ({n})")
+
+    def _show_event_details(self, e):
+        self.explain.show_event(e, clock_str(self.rec, e.onset))
+        self.flow.highlight(e.path)
 
     def _event_clicked(self, row, _col):
         it = self.ev_table.item(row, 0)
         if it is None or not self.result:
             return
-        e = self.result.events[it.data(QtCore.Qt.UserRole)]
+        e = it.data(QtCore.Qt.UserRole)
         if self.page < 60:
             self.page_box.setCurrentIndex(2)  # 60-s page shows an event with context
         self.center_on(e.onset + e.duration / 2)
+        self._show_event_details(e)
 
-    def _select_row_for(self, event_index):
+    def _select_row_for(self, event):
         for r in range(self.ev_table.rowCount()):
             it = self.ev_table.item(r, 0)
-            if it and it.data(QtCore.Qt.UserRole) == event_index:
+            if it and it.data(QtCore.Qt.UserRole) is event:
                 self.ev_table.selectRow(r)
                 self.ev_table.scrollToItem(it)
+                self._show_event_details(event)
                 return
 
     def _report_html(self, res: AnalysisResult) -> str:
@@ -1115,6 +1228,10 @@ class MainWindow(QtWidgets.QMainWindow):
 <ul>{''.join(f'<li>{f}</li>' for f in dg['findings'])}</ul>
 <p><b>Clinical flags</b></p><ul>{''.join(f'<li>{f}</li>' for f in dg['flags']) or '<li>None</li>'}</ul>
 <h3>Respiratory</h3><table>{rows([
+    ("Scoring rule", esc(res.rule_name)),
+    ("Events by confidence ≥90 / ≥75 / ≥50 %", " / ".join(str(v) for v in ix.get('confidence_counts', {}).values())
+        + f" of {ix.get('n_scored_all', 0)} scored; {ix.get('n_rejected', 0)} candidates rejected"
+        + (f"; indices use ≥{ix.get('min_confidence', 0) * 100:.0f} %" if ix.get('min_confidence') else "")),
     ("AHI", n(ix['ahi']) + " /h"), ("Obstructive AHI / Central AHI", f"{n(ix['oahi'])} / {n(ix['cahi'])} /h"),
     ("REM AHI / NREM AHI", f"{n(ix['rem_ahi'])} / {n(ix['nrem_ahi'])} /h"),
     ("Obstructive / central / mixed apneas", f"{ix['n_obstructive_apnea']} / {ix['n_central_apnea']} / {ix['n_mixed_apnea']}"),

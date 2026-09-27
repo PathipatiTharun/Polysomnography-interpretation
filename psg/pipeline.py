@@ -1,6 +1,12 @@
-"""End-to-end analysis of one recording: staging -> arousals -> respiratory events -> indices -> diagnosis."""
+"""End-to-end analysis of one recording: staging -> arousals -> respiratory events -> indices -> diagnosis.
+
+`analyze()` does the full run (~30 s).  `rescore_analysis()` re-applies new rule thresholds or a
+new confidence cut-off to an existing result in about a second, which is what the sliders in
+the app call.
+"""
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -10,11 +16,13 @@ import numpy as np
 from . import preprocess as pp
 from .arousal import ArousalParams, detect_arousals
 from .io import (EPOCH_S, STAGE_N1, STAGE_N2, STAGE_N3, STAGE_R, STAGE_UNK, STAGE_W, Recording)
-from .respiratory import RespEvent, ScoringParams, ScoringResult, empty_result, score_respiratory
+from .respiratory import RespEvent, ScoringParams, ScoringResult, empty_result, rescore, score_respiratory
+from .rules import RULES, get_rule
 from .spo2 import Desaturation, detect_desaturations, oxygen_summary
 from .staging import EpochFeatures, StagingParams, sleep_summary, stage_sleep
 
 SLEEP_CODES = [STAGE_N1, STAGE_N2, STAGE_N3, STAGE_R]
+CONFIDENCE_LEVELS = (0.9, 0.75, 0.5)
 
 
 @dataclass
@@ -24,6 +32,7 @@ class AnalysisOptions:
     scoring: ScoringParams = field(default_factory=ScoringParams)
     staging: StagingParams = field(default_factory=StagingParams)
     arousal: ArousalParams = field(default_factory=ArousalParams)
+    min_confidence: float = 0.0       # events below this confidence are left out of the indices
 
 
 @dataclass
@@ -40,10 +49,17 @@ class AnalysisResult:
     diagnosis: dict
     runtime_s: float
     warnings: list[str] = field(default_factory=list)
+    period: tuple[int, int] | None = None   # rest period used for sleep measures (epochs)
 
     @property
     def events(self) -> list[RespEvent]:
-        return self.resp.events
+        """Scored events at or above the confidence cut-off (what the indices are built from)."""
+        return self.resp.events_at_confidence(self.options.min_confidence)
+
+    @property
+    def rule_name(self) -> str:
+        rid = self.options.scoring.rule_id
+        return RULES[rid].name if rid in RULES else rid
 
 
 def ahi_severity(ahi: float) -> str:
@@ -139,11 +155,14 @@ def compute_indices(res_events: list[RespEvent], stages: np.ndarray, desats: lis
     }
 
 
-def make_diagnosis(ix: dict) -> dict:
+def make_diagnosis(ix: dict, rule_name: str | None = None, min_confidence: float = 0.0) -> dict:
     """Plain-language interpretation of the indices, following AASM/ICSD-3 adult criteria.
     This is decision support for a physician, not a diagnosis on its own."""
     ahi = ix["ahi"]
     findings: list[str] = []
+    if rule_name:
+        conf = f", events with confidence ≥ {min_confidence * 100:.0f} %" if min_confidence > 0 else ""
+        findings.append(f"Scoring rule: {rule_name}{conf}.")
     if not ix.get("respiratory_scored", True):
         findings.append(f"Sleep efficiency {ix['sleep_efficiency']:.0f} %, arousal index {ix['arousal_index']:.1f}/h.")
         return {"primary": "Respiratory events not scored (no usable airflow/effort signal)",
@@ -249,19 +268,62 @@ def analyze(rec: Recording, options: AnalysisOptions | None = None,
         warnings.append("No SpO2 channel: hypopneas can only be confirmed by arousals.")
 
     say(90, "Computing indices")
-    pos = rec.get("position")
     period = features.rest if features is not None and features.rest != (0, rec.n_epochs) else None
     if period is not None:
         warnings.append(f"Recording extends beyond the rest period: sleep measures use "
                         f"{period[0] * EPOCH_S / 3600:.1f} h - {period[1] * EPOCH_S / 3600:.1f} h (auto-detected lights off/on).")
-    ix = compute_indices(resp.events, stages, desats, arousals, resp.spo2_clean, resp.spo2_fs,
-                         pos.data if pos is not None else None, pos.fs if pos is not None else None, period)
-    ix["respiratory_scored"] = resp.fs > 1.0 or bool(resp.events)
-    ix["signal_quality"] = _signal_quality(rec, resp)
-    for ch, q in ix["signal_quality"].items():
+    quality = _signal_quality(rec, resp)
+    for ch, q in quality.items():
         if q < 0.8:
             warnings.append(f"{ch}: only {q * 100:.0f} % usable signal.")
-    diag = make_diagnosis(ix)
+    res = AnalysisResult(rec, opt, stages, source, features, arousals, resp, desats, {}, {},
+                         0.0, warnings, period)
+    _finish(res, quality)
+    res.runtime_s = time.time() - t0
     say(100, "Done")
-    return AnalysisResult(rec, opt, stages, source, features, arousals, resp, desats, ix, diag,
-                          time.time() - t0, warnings)
+    return res
+
+
+def _finish(res: AnalysisResult, quality: dict[str, float]) -> None:
+    """Indices + diagnosis for the events currently selected by rule and confidence."""
+    rec, resp, opt = res.rec, res.resp, res.options
+    pos = rec.get("position")
+    events = res.events
+    ix = compute_indices(events, res.stages, res.desaturations, res.arousals, resp.spo2_clean, resp.spo2_fs,
+                         pos.data if pos is not None else None, pos.fs if pos is not None else None, res.period)
+    ix["respiratory_scored"] = resp.fs > 1.0 or bool(resp.events)
+    ix["signal_quality"] = quality
+    ix["rule_id"] = opt.scoring.rule_id
+    ix["rule_name"] = res.rule_name
+    ix["min_confidence"] = opt.min_confidence
+    ix["confidence_counts"] = {lvl: len(resp.events_at_confidence(lvl)) for lvl in CONFIDENCE_LEVELS}
+    ix["n_scored_all"] = len(resp.events)
+    ix["n_rejected"] = len(resp.rejected_events)
+    ix["rejected_reasons"] = dict(resp.rejected)
+    res.summary = ix
+    res.diagnosis = make_diagnosis(ix, res.rule_name, opt.min_confidence)
+
+
+def rescore_analysis(res: AnalysisResult, scoring: ScoringParams | None = None,
+                     min_confidence: float | None = None) -> AnalysisResult:
+    """Apply new rule thresholds and/or a new confidence cut-off to an existing analysis.
+
+    Staging, arousals and the prepared respiratory signals are reused, so this takes about a
+    second instead of the ~30 s of a full `analyze()`.
+    """
+    scoring = scoring or res.options.scoring
+    min_conf = res.options.min_confidence if min_confidence is None else min_confidence
+    opt = dataclasses.replace(res.options, scoring=scoring, min_confidence=min_conf)
+    t0 = time.time()
+    if res.resp.signals is not None:
+        resp = rescore(res.resp, scoring)
+    else:
+        resp = res.resp
+    desats = res.desaturations
+    if resp.spo2_clean is not None and scoring.hypopnea_desat != res.options.scoring.hypopnea_desat:
+        desats = detect_desaturations(resp.spo2_clean, resp.spo2_fs, drop=scoring.hypopnea_desat)
+    out = AnalysisResult(res.rec, opt, res.stages, res.stage_source, res.features, res.arousals, resp, desats,
+                         {}, {}, 0.0, list(res.warnings), res.period)
+    _finish(out, res.summary.get("signal_quality", {}))
+    out.runtime_s = time.time() - t0
+    return out

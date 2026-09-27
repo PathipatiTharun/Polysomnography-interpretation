@@ -19,7 +19,7 @@ import numpy as np
 from psg.evaluate import match_events, staging_agreement
 from psg.io import load_recording
 from psg.pipeline import AnalysisOptions, ahi_severity, analyze
-from psg.respiratory import ScoringParams
+from psg.rules import DEFAULT_RULE, RULES, get_rule
 from psg.study import StudyError, process_study
 
 
@@ -47,16 +47,22 @@ def main(argv=None) -> int:
     ap.add_argument("files", nargs="+")
     ap.add_argument("--out", default="reports", help="output folder for HTML/CSV/JSON")
     ap.add_argument("--expert-stages", action="store_true", help="use the expert hypnogram when available")
-    ap.add_argument("--rule", choices=["aasm3", "aasm4"], default="aasm3",
-                    help="hypopnea rule: aasm3 = 3%% desat or arousal (recommended), aasm4 = 4%% desat only (CMS)")
+    ap.add_argument("--rule", choices=list(RULES) + ["aasm3", "aasm4"], default=DEFAULT_RULE,
+                    help="scoring rule version (see docs/rule_versions.md); aasm3/aasm4 are shorthands for "
+                         "aasm2012_rec / aasm2013_acc")
+    ap.add_argument("--min-confidence", type=float, default=0.0, metavar="PCT",
+                    help="only count events with at least this confidence (0-100)")
     ap.add_argument("--no-report", action="store_true")
     args = ap.parse_args(argv)
 
     files = [f for pat in args.files for f in (glob.glob(pat) or [pat])]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    scoring = ScoringParams() if args.rule == "aasm3" else ScoringParams(hypopnea_desat=4.0, hypopnea_arousal=False)
-    opts = AnalysisOptions(staging_source="expert" if args.expert_stages else "auto", scoring=scoring)
+    rule_id = {"aasm3": "aasm2012_rec", "aasm4": "aasm2013_acc"}.get(args.rule, args.rule)
+    scoring = get_rule(rule_id).params()
+    opts = AnalysisOptions(staging_source="expert" if args.expert_stages else "auto", scoring=scoring,
+                           min_confidence=args.min_confidence / 100.0)
+    print(f"Scoring rule: {get_rule(rule_id).name}" + (f"; confidence ≥ {args.min_confidence:.0f} %" if args.min_confidence else ""))
 
     rows = []
     for f in files:

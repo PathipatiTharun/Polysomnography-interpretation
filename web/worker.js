@@ -2,7 +2,7 @@
 // Everything runs locally in the browser; the recording is never sent to a server.
 importScripts("https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js");
 
-const PSG_MODULES = ["__init__", "edf", "io", "preprocess", "respiratory", "spo2", "staging",
+const PSG_MODULES = ["__init__", "edf", "io", "preprocess", "respiratory", "rules", "spo2", "staging",
                      "arousal", "pipeline", "report", "evaluate", "study"];
 
 self.psgProgress = (pct, msg) => self.postMessage({ type: "progress", pct, msg: String(msg) });

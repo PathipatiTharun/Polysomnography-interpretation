@@ -101,7 +101,8 @@ def _update_index(out_root: Path, study: Study) -> None:
         "diagnosis": r.diagnosis["primary"],
         "severity": r.diagnosis["severity"],
         "ahi": None if ahi is None or not np.isfinite(ahi) else round(float(ahi), 1),
-        "hypopnea_rule": "4%" if not r.options.scoring.hypopnea_arousal else "3%/arousal",
+        "rule": r.rule_name,
+        "min_confidence": r.options.min_confidence,
     }
     entries = [e for e in entries if e.get("source") != entry["source"]]
     entries.insert(0, entry)
